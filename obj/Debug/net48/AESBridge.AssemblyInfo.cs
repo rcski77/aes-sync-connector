@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AESBridge")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b56db36c36a6717a4d683549331d291b0349741e")]
 [assembly: System.Reflection.AssemblyProductAttribute("AESBridge")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AESBridge")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
