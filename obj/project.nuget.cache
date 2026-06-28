@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "4UWAwOWb7NY=",
+  "success": true,
+  "projectFilePath": "C:\\Git Repos\\aes-connector\\AESBridge.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\Adam\\.nuget\\packages\\microsoft.netframework.referenceassemblies\\1.0.3\\microsoft.netframework.referenceassemblies.1.0.3.nupkg.sha512",
+    "C:\\Users\\Adam\\.nuget\\packages\\microsoft.netframework.referenceassemblies.net48\\1.0.3\\microsoft.netframework.referenceassemblies.net48.1.0.3.nupkg.sha512"
+  ],
+  "logs": []
+}
