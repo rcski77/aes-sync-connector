@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Target .NET Framework 4.8 x86 to match EventScheduler_Release (x86, .NET Framework 4.0) -->
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <AssemblyName>AESBridge</AssemblyName>
+    <Nullable>disable</Nullable>
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="EventScheduler_Release">
+      <HintPath>EventScheduler.exe</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="CopyAESAssembly" AfterTargets="Build">
+    <Copy SourceFiles="EventScheduler.exe"
+          DestinationFiles="$(OutputPath)EventScheduler_Release.exe"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>

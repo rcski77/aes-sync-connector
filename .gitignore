@@ -1,0 +1,11 @@
+# Secrets — never commit
+.env
+
+# Build output
+bin/
+obj/
+
+# Runtime temp files
+scheduler_file.bin
+tournament_data.json
+remote_entry.bin
