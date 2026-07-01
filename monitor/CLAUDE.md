@@ -107,9 +107,13 @@ Two endpoints, both authenticated with `Authorization: Bearer <INGEST_API_KEY>`.
 Base URL comes from `aes_config.ini [dashboard] endpoint`.
 
 ### Delta — POST {base_url}/delta
-Fired immediately on every `CMD_REMOTE_ENTRY_UPDATE`. Builds payload from:
+Fired on every `CMD_REMOTE_ENTRY_UPDATE` **that has set scores**. Two cases are suppressed/allowed:
+- **Winner-only** (outcome set, sets empty) → suppressed; wait for the follow-up with scores
+- **Undecided + sets empty** → passes through; signals a score was cleared in AES
+
+Builds payload from:
 1. The decoded remote entry (match ID, outcome code, set scores)
-2. Match metadata looked up from `prev_data` (team names, court, times, division)
+2. Match metadata looked up from `prev_data` (team names, courtId, court, times, division)
 
 ```python
 push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout)
@@ -132,16 +136,25 @@ Both functions spawn a daemon thread so they don't block the receive loop.
 
 ### `_match_payload(m)` → ingest match shape
 Maps a `tournament_data.json` match dict:
+- `courtId`: passed through from bridge output
 - `sets`: `{"team1": x, "team2": y}` → `{"ft": x, "st": y}`
 - `startTime`/`endTime`: UTC ISO 8601 → Eastern local, no offset (via `_eastern_naive`)
 - `workTeam`: empty string → `None`
 - `hasResult`: from `decided` bool
 
+### `_strip_seed(name)` → bare team name
+Strips trailing region/seed suffix ` (XX)` (1–3 uppercase letters) from team names.
+Applied to pool standings. e.g. `"Sky High 17 Elite (GL)"` → `"Sky High 17 Elite"`.
+
 ### `_pool_payload(p)` → ingest pool shape
 Maps a pool dict; computes per-team fields not in `tournament_data.json`:
+- `courtId`: first court from `courts` array (required scalar by dashboard schema)
+- `courtName`: first court name
+- `courts`: full array passed through (pools can span multiple courts)
 - `finishRank`: 1-indexed position in standings array
 - `pointRatio`: `ptsFor / ptsAgainst`, or `None` if ptsAgainst == 0
 - `goldSpotsCount`: always `None` (not yet available from AES assembly)
+- team `name`: seed suffix stripped via `_strip_seed()`
 
 ### `_eastern_naive(iso_str)` → "YYYY-MM-DDTHH:MM:SS"
 Converts UTC ISO 8601 string to Eastern local time without offset.
@@ -175,7 +188,6 @@ On each new connection:
 ---
 
 ## Outstanding / Known Gaps
-- **Pool team names** in standings include seed suffix, e.g. "(GL)". The ingest API
-  expects bare team names. `_pool_payload()` should strip the parenthetical suffix.
-  Pattern: strip ` (XX)` where XX is 1-3 uppercase letters at end of string.
 - **goldSpotsCount** always `None` — see bridge/CLAUDE.md for investigation notes.
+- **aesEventId** — connector sends numeric `eventId` integer. Dashboard `Event` table must
+  store this numeric ID for ingest endpoint matching (web API string ID is not in the local binary).

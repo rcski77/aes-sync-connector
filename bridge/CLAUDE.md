@@ -85,8 +85,11 @@ Confirmed present via reflection dump of EventScheduler_Release.exe:
 | Property | Notes |
 |---|---|
 | `PlayID` | Unique ID |
-| `CompleteShortName` | e.g. "R1P1" |
-| `Matches` | Match[] — iterate to compute standings and find court/date |
+| `FullName` | e.g. "Pool 1" — accessed via `RStr(pool, "FullName")` |
+| `ShortName` | e.g. "P1" — accessed via `RStr(pool, "ShortName")` |
+| `CompleteShortName` | e.g. "R1P1" — fallback if FullName/ShortName unavailable |
+| `Courts` | Court[] — accessed via reflection; each court has `CourtID` (int) and `Name` (string) |
+| `Matches` | Match[] — iterate to compute standings and find date |
 | `OwningGroup?.OwningRound?.OwningDivision` | Chain to get division |
 
 ## Known Bracket Properties (AES.Scheduler.Model.Bracket)
@@ -130,8 +133,11 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "shortName", "fullName"
   }],
   "pools": [{
-    "poolId", "name", "shortName", "divisionCode", "divisionName",
-    "courtName",   // from first scheduled match in pool
+    "poolId",
+    "name",      // Pool.FullName (reflection), e.g. "Pool 1"; fallback: CompleteFullName
+    "shortName", // Pool.ShortName (reflection), e.g. "P1"; fallback: CompleteShortName
+    "divisionCode", "divisionName",
+    "courts": [{ "courtId", "name" }],  // Pool.Courts (reflection); fallback: single entry from first match
     "date",        // "YYYY-MM-DD" UTC, from first scheduled match
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
   }],
@@ -173,5 +179,7 @@ Pool standings are computed by AESBridge from match results (not read from AES d
 ## Outstanding / Known Gaps
 - `goldSpotsCount` — number of teams advancing to gold bracket — not yet found in assembly.
   Investigate properties on `Pool.OwningGroup` or `Pool.OwningRound`.
-- Pool team names in standings include seed suffix (e.g. "(GL)") — stripped by monitor.
+- Pool standings `team` names include seed suffix (e.g. "(GL)") — stripped by `_strip_seed()` in monitor.
 - `workTeam` is an empty string when not assigned; monitor coerces to null.
+- Full AES web API event ID string (e.g. `PTAwMDAwNDUwMjk90`) is not present in the SchedulerFile
+  binary — only the numeric `eventId` integer is available locally.

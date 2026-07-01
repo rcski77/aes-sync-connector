@@ -205,7 +205,7 @@ the monitor transforms it into the ingest API payload shape before POSTing.
   }],
   "pools": [{
     "poolId", "name", "shortName", "divisionCode", "divisionName",
-    "courtName",    // from first scheduled match in pool
+    "courts": [{ "courtId", "name" }],  // from Pool.Courts (reflection); fallback = first match court
     "date",         // "YYYY-MM-DD" from first scheduled match (UTC)
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
   }],
@@ -238,25 +238,32 @@ The monitor posts to two endpoints on the dashboard server. Auth is
 `Authorization: Bearer <INGEST_API_KEY>`. Base URL is set in aes_config.ini `endpoint`.
 
 ### POST /api/ingest/delta
-Fires immediately on every `CMD_REMOTE_ENTRY_UPDATE` (score entry). Single match only.
+Fires on every `CMD_REMOTE_ENTRY_UPDATE` **with set scores present**. Winner-only
+updates (outcome set but no sets yet) are suppressed. Undecided + no sets passes
+through (signals a score was cleared). Single match only.
 ```json
 {
   "aesEventId": "33281",
   "match": {
     "matchId": -51376,
     "division": "17 Open",
+    "courtId": -64759,
     "courtName": "North 14",
     "startTime": "2025-06-28T12:30:00",   // local Eastern, no offset
     "endTime":   "2025-06-28T13:30:00",
-    "team1": "Sky High 17 Elite (GL)",
-    "team2": "COLAVOL 17 Black (NO)",
-    "workTeam": "414 - 17 Outlaws (SO)",  // null if not assigned
+    "team1": "Sky High 17 Elite",          // seed suffix stripped
+    "team2": "COLAVOL 17 Black",
+    "workTeam": "414 - 17 Outlaws",        // null if not assigned
     "hasResult": true,
     "outcome": "FirstTeamWon",
     "sets": [{ "ft": 25, "st": 10 }, { "ft": 25, "st": 12 }]
   }
 }
 ```
+
+**Note:** `aesEventId` is the numeric `eventId` integer from the SchedulerFile (e.g. `"33281"`).
+The full AES web API string ID (e.g. `PTAwMDAwNDUwMjk90`) is not present in the local binary
+and cannot be read by the connector. The dashboard must store and match on the numeric ID.
 
 ### POST /api/ingest/snapshot
 Fires on first connect, then throttled to every 3 minutes (SNAPSHOT_INTERVAL = 180s).
@@ -269,13 +276,15 @@ Full tournament state — dashboard upserts everything and deletes absences.
   "pools": [{
     "playId": 11111,
     "division": "17 Open",
-    "name": "Pool A",
-    "shortName": "R1P1",
-    "courtName": "North 14",
+    "name": "Pool 1",        // FullName from assembly, e.g. "Pool 1"
+    "shortName": "P1",       // ShortName from assembly, e.g. "P1"
+    "courtId": -64759,       // first court ID (required by dashboard schema)
+    "courtName": "North 14", // first court name
+    "courts": [{ "courtId": -64759, "name": "North 14" }],  // full array (pools can span multiple courts)
     "date": "2025-06-28",
     "goldSpotsCount": null,
     "teams": [{
-      "name": "Sky High 17 Elite",
+      "name": "Sky High 17 Elite",   // seed suffix stripped
       "matchesWon": 3, "matchesLost": 0,
       "setsWon": 6, "setsLost": 1,
       "pointRatio": 1.42,   // ptsFor/ptsAgainst, null if no points against
@@ -321,9 +330,9 @@ Auth: Authorization: Bearer <INGEST_API_KEY>
    bracket is not yet extracted from the AES assembly. Needs investigation via reflection
    to find the right property on Pool or its OwningGroup/OwningRound.
 
-2. **Pool team names include seed suffix** — `standings[].team` comes from `m.FirstTeamText`
-   which includes role/seed (e.g. "Sky High 17 Elite (GL)"). The ingest API spec expects
-   the bare team name. Need to strip the parenthetical suffix in the monitor's `_pool_payload()`.
+2. **aesEventId mismatch** — the connector sends the numeric `eventId` integer. The dashboard
+   `Event` table must store this numeric ID (in addition to or instead of the web API string
+   like `PTAwMDAwNDUwMjk90`) for the ingest endpoints to match successfully.
 
 ## Context
 - Adam: tournament director, 20yr experience, ~150 events/yr, Midwest-focused

@@ -331,12 +331,16 @@ def _pool_payload(p):
             'pointRatio':  ratio,
             'finishRank':  rank,
         })
+    courts = p.get('courts') or []
+    first_court = courts[0] if courts else {}
     return {
         'playId':          p.get('poolId'),
         'division':        p.get('divisionName', ''),
         'name':            p.get('name', ''),
         'shortName':       p.get('shortName', ''),
-        'courts':          p.get('courts', []),
+        'courtId':         first_court.get('courtId'),
+        'courtName':       first_court.get('name', ''),
+        'courts':          courts,
         'date':            p.get('date', ''),
         'goldSpotsCount':  None,
         'teams':           teams,
