@@ -309,7 +309,8 @@ class AESBridge
 
     static string PoolJson(Pool pool)
     {
-        string divCode = "", divName = "", poolName = "", shortName = "", courtName = "", date = "";
+        string divCode = "", divName = "", poolName = "", shortName = "", date = "";
+        var courtsJson = new StringBuilder("[");
         try
         {
             var div = pool.OwningGroup?.OwningRound?.OwningDivision;
@@ -318,19 +319,43 @@ class AESBridge
                 divCode = div.CodeAlias ?? "";
                 divName = div.DescriptionAlias ?? "";
             }
-            poolName  = RStr(pool, "Name");
-            if (string.IsNullOrEmpty(poolName)) poolName = pool.CompleteShortName ?? "";
-            shortName = pool.CompleteShortName ?? "";
+            poolName  = RStr(pool, "FullName");
+            if (string.IsNullOrEmpty(poolName)) poolName = pool.CompleteFullName ?? pool.CompleteShortName ?? "";
+            shortName = RStr(pool, "ShortName");
+            if (string.IsNullOrEmpty(shortName)) shortName = pool.CompleteShortName ?? "";
 
-            // Derive courtName and date from the first scheduled match in the pool
+            // Try to read Courts collection directly from the Pool/Play object
+            bool gotCourts = false;
+            try
+            {
+                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                var courtsVal = pool.GetType().GetProperty("Courts", flags)?.GetValue(pool)
+                             ?? pool.GetType().GetField("Courts", flags)?.GetValue(pool);
+                if (courtsVal is System.Collections.IEnumerable seq)
+                {
+                    bool firstC = true;
+                    foreach (var c in seq)
+                    {
+                        if (!firstC) courtsJson.Append(", ");
+                        courtsJson.Append($"{{\"courtId\": {RInt(c, "CourtID")}, \"name\": {S(RStr(c, "Name"))}}}");
+                        firstC = false;
+                        gotCourts = true;
+                    }
+                }
+            }
+            catch { }
+
+            // Fall back: derive single court from first scheduled match
             var first = pool.Matches?.FirstOrDefault(m => m.IsScheduled);
             if (first != null)
             {
-                courtName = first.ScheduledCourtText ?? "";
-                date      = first.ScheduledStartDateTime.ToString("yyyy-MM-dd");
+                date = first.ScheduledStartDateTime.ToString("yyyy-MM-dd");
+                if (!gotCourts)
+                    courtsJson.Append($"{{\"courtId\": {CourtId(first)}, \"name\": {S(first.ScheduledCourtText ?? "")}}}");
             }
         }
         catch { }
+        courtsJson.Append("]");
 
         var standings = ComputeStandings(pool);
 
@@ -340,7 +365,7 @@ class AESBridge
         sb.Append($"\"shortName\":    {S(shortName)}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
-        sb.Append($"\"courtName\":    {S(courtName)}, ");
+        sb.Append($"\"courts\":       {courtsJson}, ");
         sb.Append($"\"date\":         {S(date)}, ");
         sb.Append("\"standings\": [");
         for (int i = 0; i < standings.Count; i++)

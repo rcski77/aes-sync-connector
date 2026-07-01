@@ -10,7 +10,7 @@ Usage:  python aes_monitor.py
 """
 
 import os, sys, socket, struct, hashlib, base64, gzip, zlib
-import subprocess, json, datetime, threading, time
+import subprocess, json, datetime, threading, time, re
 import configparser, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
 
@@ -298,6 +298,7 @@ def _match_payload(m):
     return {
         'matchId':   m.get('matchId'),
         'division':  m.get('divisionName', ''),
+        'courtId':   m.get('courtId'),
         'courtName': m.get('courtName', ''),
         'startTime': _eastern_naive(m.get('startTime', '')),
         'endTime':   _eastern_naive(m.get('endTime', '')),
@@ -309,6 +310,10 @@ def _match_payload(m):
     }
 
 
+def _strip_seed(name):
+    return re.sub(r'\s+\([A-Z]{1,3}\)$', '', name or '').strip()
+
+
 def _pool_payload(p):
     """Map a tournament_data.json pool dict to the ingest API pool shape."""
     standings = p.get('standings', [])
@@ -318,7 +323,7 @@ def _pool_payload(p):
         pts_for     = st.get('ptsFor', 0)
         ratio = round(pts_for / pts_against, 4) if pts_against else None
         teams.append({
-            'name':        st.get('team', ''),
+            'name':        _strip_seed(st.get('team', '')),
             'matchesWon':  st.get('wins', 0),
             'matchesLost': st.get('losses', 0),
             'setsWon':     st.get('setsWon', 0),
@@ -331,7 +336,7 @@ def _pool_payload(p):
         'division':        p.get('divisionName', ''),
         'name':            p.get('name', ''),
         'shortName':       p.get('shortName', ''),
-        'courtName':       p.get('courtName', ''),
+        'courts':          p.get('courts', []),
         'date':            p.get('date', ''),
         'goldSpotsCount':  None,
         'teams':           teams,
@@ -360,6 +365,9 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout):
         except: pass
         i += 2
 
+    if not set_scores and outcome_code != '0':
+        return  # winner-only delta (no scores entered yet) — wait for the complete one
+
     # Look up match info from the current snapshot for division/court/times/teams
     match_info = {}
     if tournament_data:
@@ -375,18 +383,20 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout):
         'match': {
             'matchId':   match_id,
             'division':  match_info.get('divisionName', ''),
+            'courtId':   match_info.get('courtId'),
             'courtName': match_info.get('courtName', ''),
             'startTime': _eastern_naive(match_info.get('startTime', '')),
             'endTime':   _eastern_naive(match_info.get('endTime', '')),
             'team1':     match_info.get('team1', ''),
             'team2':     match_info.get('team2', ''),
-            'workTeam':  None,
+            'workTeam':  match_info.get('workTeam') or None,
             'hasResult': outcome_code in ('1', '2', '3', '4', '5'),
             'sets':      set_scores,
             'outcome':   outcome_map.get(outcome_code, 'Undecided'),
         },
     }
     url = base_url.rstrip('/') + '/delta'
+    # print(f"\n  ── Delta payload ──\n{json.dumps(payload, indent=2)}\n")
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'delta'), daemon=True).start()
 
 
