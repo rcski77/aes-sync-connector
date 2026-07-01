@@ -20,35 +20,22 @@ try:
 except ImportError:
     print("ERROR: pip install pycryptodome"); sys.exit(1)
 
+# When frozen by PyInstaller, __file__ points into the temp extraction folder.
+# Use sys.executable instead so config/data files are found next to the .exe.
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 def load_config():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Load .env — check next to script first, then parent directory (project root)
-    env_path = os.path.join(script_dir, '.env')
-    if not os.path.exists(env_path):
-        env_path = os.path.join(os.path.dirname(script_dir), '.env')
-    if os.path.exists(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    os.environ.setdefault(k.strip(), v.strip())
-
-    cfg = configparser.RawConfigParser()  # RawConfigParser avoids % interpolation on $ values
-    cfg_path = os.path.join(script_dir, 'aes_config.ini')
+    cfg = configparser.ConfigParser()
+    cfg_path = os.path.join(_BASE_DIR, 'aes_config.ini')
     if not os.path.exists(cfg_path):
         print(f"ERROR: Config file not found: {cfg_path}")
         sys.exit(1)
     cfg.read(cfg_path)
-
-    # Expand ${VAR} / $VAR references in every value
-    for section in cfg.sections():
-        for key, value in cfg.items(section):
-            cfg.set(section, key, os.path.expandvars(value))
-
     return cfg
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -201,7 +188,7 @@ def client_init(sock, password):
 
 # ── Bridge ─────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = _BASE_DIR
 
 def call_bridge(raw, bridge_exe):
     """Parse SchedulerFile binary via AESBridge.exe → returns dict or None."""
@@ -248,19 +235,24 @@ def decode_remote_entry(raw, bridge_exe):
 
 SNAPSHOT_INTERVAL = 180  # seconds between full snapshot POSTs
 
-def _post(url, payload_obj, ingest_key, timeout, label):
+def _post(url, payload_obj, ingest_key, timeout, label, cf_headers=None):
     """Serialize and POST a payload; log result. Runs in a daemon thread."""
     try:
         payload = json.dumps(payload_obj).encode('utf-8')
+        headers = {
+            'Content-Type':   'application/json',
+            'Content-Length': str(len(payload)),
+            'User-Agent':     'aes-sync-connector/1.0',
+        }
+        if ingest_key:
+            headers['Authorization'] = f'Bearer {ingest_key}'
+        if cf_headers:
+            headers.update(cf_headers)
         req = urllib.request.Request(
             url,
-            data   = payload,
-            method = 'POST',
-            headers = {
-                'Content-Type':   'application/json',
-                'Content-Length': str(len(payload)),
-                **(({'Authorization': f'Bearer {ingest_key}'}) if ingest_key else {}),
-            }
+            data    = payload,
+            method  = 'POST',
+            headers = headers,
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
@@ -347,7 +339,7 @@ def _pool_payload(p):
     }
 
 
-def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout):
+def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_headers=None):
     """POST a single score delta to /api/ingest/delta."""
     if not base_url or not entry_obj:
         return
@@ -401,10 +393,10 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout):
     }
     url = base_url.rstrip('/') + '/delta'
     # print(f"\n  ── Delta payload ──\n{json.dumps(payload, indent=2)}\n")
-    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'delta'), daemon=True).start()
+    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'delta', cf_headers), daemon=True).start()
 
 
-def push_snapshot(tournament_data, base_url, ingest_key, timeout):
+def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None):
     """POST full tournament state to /api/ingest/snapshot."""
     if not base_url or not tournament_data:
         return
@@ -416,7 +408,7 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout):
         'pools':         [_pool_payload(p) for p in tournament_data.get('pools', [])],
     }
     url = base_url.rstrip('/') + '/snapshot'
-    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot'), daemon=True).start()
+    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot', cf_headers), daemon=True).start()
 
 # ── Remote entry formatter ─────────────────────────────────────────────────────
 
@@ -507,9 +499,12 @@ def monitor(cfg):
     host        = cfg.get('aes', 'host',     fallback='127.0.0.1')
     port        = cfg.getint('aes', 'port',  fallback=17471)
     password    = cfg.get('aes', 'password', fallback='')
-    base_url    = cfg.get('dashboard', 'endpoint',    fallback='').strip()
-    ingest_key  = cfg.get('dashboard', 'ingest_key',  fallback='').strip()
-    timeout     = cfg.getint('dashboard', 'timeout',  fallback=10)
+    base_url    = cfg.get('dashboard', 'endpoint',        fallback='').strip()
+    ingest_key  = cfg.get('dashboard', 'ingest_key',      fallback='').strip()
+    timeout     = cfg.getint('dashboard', 'timeout',      fallback=10)
+    cf_id       = cfg.get('dashboard', 'cf_client_id',    fallback='').strip()
+    cf_secret   = cfg.get('dashboard', 'cf_client_secret',fallback='').strip()
+    cf_headers  = {'CF-Access-Client-Id': cf_id, 'CF-Access-Client-Secret': cf_secret} if cf_id else None
 
     # Resolve bridge path relative to script directory
     bridge_rel = cfg.get('bridge', 'exe', fallback=r'..\bridge\bin\Release\net48\AESBridge.exe')
@@ -561,7 +556,7 @@ def monitor(cfg):
                     if curr and base_url:
                         now = datetime.datetime.now(datetime.timezone.utc)
                         if last_snapshot is None or (now - last_snapshot).total_seconds() >= SNAPSHOT_INTERVAL:
-                            push_snapshot(curr, base_url, ingest_key, timeout)
+                            push_snapshot(curr, base_url, ingest_key, timeout, cf_headers)
                             last_snapshot = now
 
                     prev_data = curr
@@ -576,7 +571,7 @@ def monitor(cfg):
 
                     # Push delta immediately
                     if obj and base_url:
-                        push_delta(obj, prev_data, base_url, ingest_key, timeout)
+                        push_delta(obj, prev_data, base_url, ingest_key, timeout, cf_headers)
 
                 elif cc in (CMD_FINISHED_PLAYS, CMD_PRINTABLE_MATCHES,
                             CMD_PRINTABLE_PLAYS, CMD_AUTO_PRINT_MATCHES):
