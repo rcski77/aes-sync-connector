@@ -23,20 +23,19 @@ aes-connector/
 │   ├── aes_test.py           ← one-shot connection test
 │   ├── aes_sync_probe.py     ← protocol debugger
 │   └── aes_config.ini        ← config (passwords/endpoints via .env)
+├── .env                  ← secrets (not committed)
 └── CLAUDE.md
 ```
 
 ## Files
 | File | Purpose |
 |------|---------|
-| monitor/aes_monitor.py | Production monitor — connects to AES, calls AESBridge, POSTs to dashboard |
+| monitor/aes_monitor.py | Production monitor — connects to AES, calls AESBridge, POSTs to dashboard ingest API |
 | monitor/aes_test.py | One-shot connection test — run first to verify AES is reachable |
 | monitor/aes_sync_probe.py | Protocol debugger — try commands, log everything |
-| monitor/aes_config.ini | Config: AES host/port/password, bridge path, dashboard endpoint/token |
+| monitor/aes_config.ini | Config: AES host/port/password, bridge path, dashboard endpoint/key |
 | bridge/AESBridge.cs | C# bridge — deserializes SchedulerFile binary, outputs tournament_data.json |
 | bridge/AESBridge.csproj | .NET project (net48, x86) — build with: dotnet build -c Release |
-| aes-connector.js | Node.js module — attach to Express app to receive POSTs + broadcast via WS |
-| aes-client.js | Browser-side WebSocket client |
 
 ## Build
 ```
@@ -46,11 +45,42 @@ dotnet build AESBridge.csproj -c Release
 # Requires: EventScheduler.exe in bridge\ folder
 ```
 
+**NOTE:** `dotnet` is not on the PowerShell PATH. Use Git Bash or prefix with the full path:
+`"C:\Program Files\dotnet\dotnet.exe" build AESBridge.csproj -c Release`
+
+**NOTE:** After any edit to AESBridge.cs, always run dotnet build immediately to catch
+C# string escaping bugs — escaped quotes inside interpolated strings corrupt silently.
+
 ## Run
 ```
 cd "C:\Git Repos\aes-connector\monitor"
 python aes_monitor.py
-# Reads aes_config.ini automatically
+# Reads aes_config.ini + ../.env automatically
+```
+
+## Config
+
+**aes_config.ini** (in monitor/):
+```ini
+[aes]
+host     = 127.0.0.1
+port     = 17471
+password = ${AES_PASSWORD}
+
+[bridge]
+exe = ..\bridge\bin\Release\net48\AESBridge.exe
+
+[dashboard]
+endpoint   = ${DASHBOARD_ENDPOINT}   # base URL up to /api/ingest (no trailing slash)
+ingest_key = ${INGEST_API_KEY}
+timeout    = 10
+```
+
+**.env** (project root — loaded by monitor on startup, checked in monitor/ first then parent):
+```
+AES_PASSWORD=your_aes_password
+DASHBOARD_ENDPOINT=https://your-dashboard.com/api/ingest
+INGEST_API_KEY=your_shared_secret
 ```
 
 ---
@@ -137,7 +167,7 @@ AESBridge.exe calls SchedulerFile.Load(bytes) from EventScheduler_Release.exe
 and outputs tournament_data.json.
 
 **Key property names in EventScheduler assembly:**
-- `m.FirstTeamText` / `m.SecondTeamText` — formatted team name with seed
+- `m.FirstTeamText` / `m.SecondTeamText` / `m.WorkTeamText` — formatted team name with seed
 - `m.ScoreText` — "25-20, 25-18" formatted string
 - `m.Sets` — Match.Set[] where set.FirstTeamScore / set.SecondTeamScore are nullable int
 - `m.ScheduledCourtText` — "Court 1" or "No Court"
@@ -151,21 +181,20 @@ and outputs tournament_data.json.
 - `bracket.PlotMatchPositions()` — returns List<MatchPlacement> with X/Y layout
 - `ScheduledCourtID` is internal — use reflection or match ScheduledCourtText
 
-**IMPORTANT — C# string escaping bug:**
-When editing AESBridge.cs with Python scripts, escaped quotes inside
-C# interpolated strings frequently get corrupted.
-Always run `dotnet build` after edits to catch syntax errors early.
-
 ---
 
 ## tournament_data.json Schema
+Written to monitor/ at runtime. This is AESBridge's intermediate output;
+the monitor transforms it into the ingest API payload shape before POSTing.
+
 ```json
 {
   "event": { "name", "eventId", "startDate", "endDate", "lastUpdated" },
   "courts": [{ "courtId", "name" }],
   "matches": [{
     "matchId", "courtId", "courtName", "startTime", "endTime", "matchLength",
-    "team1", "team2", "divisionCode", "divisionName", "playName",
+    "team1", "team2", "workTeam",   // workTeam is null if not assigned
+    "divisionCode", "divisionName", "playName",
     "playType",     // "pool" | "bracket" | "playoff"
     "outcome",      // "Undecided" | "FirstTeamWon" | "SecondTeamWon" | etc.
     "decided",      // bool
@@ -175,7 +204,9 @@ Always run `dotnet build` after edits to catch syntax errors early.
     "shortName", "fullName"
   }],
   "pools": [{
-    "poolId", "name", "divisionCode", "divisionName",
+    "poolId", "name", "shortName", "divisionCode", "divisionName",
+    "courtName",    // from first scheduled match in pool
+    "date",         // "YYYY-MM-DD" from first scheduled match (UTC)
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
   }],
   "brackets": [{
@@ -192,8 +223,8 @@ Always run `dotnet build` after edits to catch syntax errors early.
         "outcome", "decided", "firstTeamWon", "secondTeamWon",
         "scoreText", "sets": [{ "team1", "team2" }]  // ALL set slots incl. unplayed (null)
       },
-      "topSource":    { ...recursive, same structure },
-      "bottomSource": { ...recursive, same structure }
+      "topSource":    { ...recursive },
+      "bottomSource": { ...recursive }
     }]
   }]
 }
@@ -201,66 +232,102 @@ Always run `dotnet build` after edits to catch syntax errors early.
 
 ---
 
+## Dashboard Ingest API
+
+The monitor posts to two endpoints on the dashboard server. Auth is
+`Authorization: Bearer <INGEST_API_KEY>`. Base URL is set in aes_config.ini `endpoint`.
+
+### POST /api/ingest/delta
+Fires immediately on every `CMD_REMOTE_ENTRY_UPDATE` (score entry). Single match only.
+```json
+{
+  "aesEventId": "33281",
+  "match": {
+    "matchId": -51376,
+    "division": "17 Open",
+    "courtName": "North 14",
+    "startTime": "2025-06-28T12:30:00",   // local Eastern, no offset
+    "endTime":   "2025-06-28T13:30:00",
+    "team1": "Sky High 17 Elite (GL)",
+    "team2": "COLAVOL 17 Black (NO)",
+    "workTeam": "414 - 17 Outlaws (SO)",  // null if not assigned
+    "hasResult": true,
+    "outcome": "FirstTeamWon",
+    "sets": [{ "ft": 25, "st": 10 }, { "ft": 25, "st": 12 }]
+  }
+}
+```
+
+### POST /api/ingest/snapshot
+Fires on first connect, then throttled to every 3 minutes (SNAPSHOT_INTERVAL = 180s).
+Full tournament state — dashboard upserts everything and deletes absences.
+```json
+{
+  "aesEventId": "33281",
+  "snapshotTime": "2025-06-28T17:00:00Z",
+  "matches": [ ...same match shape as delta... ],
+  "pools": [{
+    "playId": 11111,
+    "division": "17 Open",
+    "name": "Pool A",
+    "shortName": "R1P1",
+    "courtName": "North 14",
+    "date": "2025-06-28",
+    "goldSpotsCount": null,
+    "teams": [{
+      "name": "Sky High 17 Elite",
+      "matchesWon": 3, "matchesLost": 0,
+      "setsWon": 6, "setsLost": 1,
+      "pointRatio": 1.42,   // ptsFor/ptsAgainst, null if no points against
+      "finishRank": 1       // 1-indexed from standings order
+    }]
+  }]
+}
+```
+
+**Time handling:** AESBridge emits UTC ISO 8601. The monitor converts to Eastern local
+time (no offset) using `zoneinfo.ZoneInfo('America/New_York')`, with a fixed -5h fallback
+if zoneinfo is unavailable.
+
+---
+
 ## Production Deployment Architecture
 ```
-Windows laptop (runs AES Scheduler)        Dashboard server (Node.js)
-────────────────────────────────────       ──────────────────────────
-EventScheduler.exe                         server.js
-  │ port 17471                               const { attachAES } = require('./aes-connector')
-  │                                          attachAES(app, server)
-aes_monitor.py  ←── aes_config.ini          │
-  │ subprocess                               ├── POST /api/aes-update  ← receives from monitor
-  ▼                                          ├── GET  /api/aes-data    ← current state
-AESBridge.exe                               ├── GET  /api/aes-status  ← health check
-  │ writes                                   └── WS   /aes-live        ← browser clients
+Windows laptop (runs AES Scheduler)
+────────────────────────────────────
+EventScheduler.exe
+  │ port 17471
+  │
+aes_monitor.py  ←── aes_config.ini ←── .env
+  │ subprocess
   ▼
-tournament_data.json
-  │ HTTP POST → X-AES-Token header
-  └──────────────────────────────────────►  /api/aes-update
-                                            stores in memory, broadcasts via WebSocket
-                                                     │
-                                            Browser clients (aes-client.js)
-                                            window.AES.getMatches() etc.
+AESBridge.exe
+  │ writes monitor/tournament_data.json (intermediate)
+  │
+  ├── on RemoteEntryUpdate → POST /api/ingest/delta   (immediate)
+  └── on EventUpdate (throttled 3 min) → POST /api/ingest/snapshot
+
+Dashboard server (aes-tourney-director, Node.js/Express)
+─────────────────────────────────────────────────────────
+POST /api/ingest/delta     ← upserts single match result
+POST /api/ingest/snapshot  ← upserts all matches + pools, deletes absences
+Auth: Authorization: Bearer <INGEST_API_KEY>
 ```
-
-**aes_config.ini:**
-```ini
-[aes]
-host     = 127.0.0.1
-port     = 17471
-password = your_password_here
-
-[bridge]
-exe = bin\Release\net48\AESBridge.exe
-
-[dashboard]
-endpoint = https://your-dashboard.com/api/aes-update
-token    = your_shared_secret
-timeout  = 10
-```
-
-**Dashboard integration (2 lines):**
-```javascript
-const { attachAES } = require('./aes-connector')
-attachAES(app, server)   // app = Express app, server = http.Server
-```
-Set env var: `AES_TOKEN=your_shared_secret` (must match aes_config.ini token)
 
 ---
 
 ## Outstanding Issues
-1. **EventUpdate diff shows "no score changes"** even when scores change.
-   aes_monitor.py calls AESBridge, reads tournament_data.json, diffs vs prev_data.
-   Suspect: path mismatch between where bridge writes JSON and where monitor reads it,
-   or prev_data being set to None after a failed bridge call.
-   The RemoteEntryUpdate decoder DOES work correctly and shows score changes immediately.
+1. **goldSpotsCount always null** — the number of teams advancing from each pool to gold
+   bracket is not yet extracted from the AES assembly. Needs investigation via reflection
+   to find the right property on Pool or its OwningGroup/OwningRound.
 
-2. **aes_connector.py is outdated** — still uses port 19211 display protocol.
-   Should be rewritten to match aes_monitor.py (port 17471, ClientInit, config file).
+2. **Pool team names include seed suffix** — `standings[].team` comes from `m.FirstTeamText`
+   which includes role/seed (e.g. "Sky High 17 Elite (GL)"). The ingest API spec expects
+   the bare team name. Need to strip the parenthetical suffix in the monitor's `_pool_payload()`.
 
 ## Context
 - Adam: tournament director, 20yr experience, ~150 events/yr, Midwest-focused
-- Dashboard: Node.js/Express, director-facing operational tool
+- Dashboard: Node.js/Express app in separate repo (aes-tourney-director), director-facing
 - No tablets used — only main AES UI for score entry
 - Future: bidirectional score submission possible via RemoteEntryUpdateAttached
   (server on port 17471 accepts it from clients, applies + rebroadcasts)
