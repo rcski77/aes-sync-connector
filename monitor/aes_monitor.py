@@ -246,34 +246,163 @@ def decode_remote_entry(raw, bridge_exe):
 
 # ── Dashboard push ─────────────────────────────────────────────────────────────
 
-def push_to_dashboard(data, endpoint, token, timeout):
-    """POST tournament_data.json to the dashboard API endpoint."""
-    if not endpoint:
-        return
+SNAPSHOT_INTERVAL = 180  # seconds between full snapshot POSTs
+
+def _post(url, payload_obj, ingest_key, timeout, label):
+    """Serialize and POST a payload; log result. Runs in a daemon thread."""
     try:
-        payload = json.dumps(data).encode('utf-8')
+        payload = json.dumps(payload_obj).encode('utf-8')
         req = urllib.request.Request(
-            endpoint,
-            data    = payload,
-            method  = 'POST',
+            url,
+            data   = payload,
+            method = 'POST',
             headers = {
-                'Content-Type': 'application/json',
+                'Content-Type':   'application/json',
                 'Content-Length': str(len(payload)),
-                **(({'X-AES-Token': token}) if token else {}),
+                **(({'Authorization': f'Bearer {ingest_key}'}) if ingest_key else {}),
             }
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = resp.status
-            if status == 200:
-                log(f"Dashboard push OK ({status})")
+            if resp.status == 200:
+                log(f"{label} OK (200)")
             else:
-                log(f"Dashboard push returned {status}")
+                log(f"{label} returned {resp.status}")
     except urllib.error.HTTPError as e:
-        log(f"Dashboard push HTTP {e.code}: {e.reason}")
+        log(f"{label} HTTP {e.code}: {e.reason}")
     except urllib.error.URLError as e:
-        log(f"Dashboard push failed: {e.reason}")
+        log(f"{label} failed: {e.reason}")
     except Exception as e:
-        log(f"Dashboard push exception: {e}")
+        log(f"{label} exception: {e}")
+
+
+def _eastern_naive(iso_str):
+    """Convert an ISO 8601 UTC string from the bridge to Eastern local time, no offset."""
+    try:
+        import datetime as _dt
+        # bridge emits e.g. "2025-06-28T17:30:00.0000000+00:00"
+        dt = _dt.datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+        # Convert to Eastern — use zoneinfo (Python 3.9+) or fall back to fixed offset
+        try:
+            from zoneinfo import ZoneInfo
+            eastern = dt.astimezone(ZoneInfo('America/New_York'))
+        except ImportError:
+            # Fixed -5 fallback (no DST awareness — acceptable degradation)
+            eastern = dt + _dt.timedelta(hours=-5)
+        return eastern.strftime('%Y-%m-%dT%H:%M:%S')
+    except Exception:
+        return iso_str  # pass through unchanged if parsing fails
+
+
+def _match_payload(m):
+    """Map a tournament_data.json match dict to the ingest API match shape."""
+    return {
+        'matchId':   m.get('matchId'),
+        'division':  m.get('divisionName', ''),
+        'courtName': m.get('courtName', ''),
+        'startTime': _eastern_naive(m.get('startTime', '')),
+        'endTime':   _eastern_naive(m.get('endTime', '')),
+        'team1':     m.get('team1', ''),
+        'team2':     m.get('team2', ''),
+        'workTeam':  None,
+        'hasResult': bool(m.get('decided')),
+        'sets':      [{'ft': s['team1'], 'st': s['team2']} for s in m.get('sets', [])],
+    }
+
+
+def _pool_payload(p):
+    """Map a tournament_data.json pool dict to the ingest API pool shape."""
+    standings = p.get('standings', [])
+    teams = []
+    for rank, st in enumerate(standings, start=1):
+        pts_against = st.get('ptsAgainst', 0)
+        pts_for     = st.get('ptsFor', 0)
+        ratio = round(pts_for / pts_against, 4) if pts_against else None
+        teams.append({
+            'name':        st.get('team', ''),
+            'matchesWon':  st.get('wins', 0),
+            'matchesLost': st.get('losses', 0),
+            'setsWon':     st.get('setsWon', 0),
+            'setsLost':    st.get('setsLost', 0),
+            'pointRatio':  ratio,
+            'finishRank':  rank,
+        })
+    return {
+        'playId':          p.get('poolId'),
+        'division':        p.get('divisionName', ''),
+        'name':            p.get('name', ''),
+        'shortName':       p.get('shortName', ''),
+        'courtName':       p.get('courtName', ''),
+        'date':            p.get('date', ''),
+        'goldSpotsCount':  None,
+        'teams':           teams,
+    }
+
+
+def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout):
+    """POST a single score delta to /api/ingest/delta."""
+    if not base_url or not entry_obj:
+        return
+    vals = entry_obj.get('values') or []
+    if len(vals) < 4:
+        return
+
+    try:    match_id = int(vals[2])
+    except: return
+
+    outcome_code = str(vals[3]) if vals[3] is not None else '0'
+    outcome_map  = {'1': 'FirstTeamWon', '2': 'SecondTeamWon', '3': 'Tie',
+                    '4': 'FirstTeamForfeit', '5': 'SecondTeamForfeit'}
+
+    set_scores = []
+    i = 6
+    while i + 1 < len(vals):
+        try: set_scores.append({'ft': int(vals[i]), 'st': int(vals[i+1])})
+        except: pass
+        i += 2
+
+    # Look up match info from the current snapshot for division/court/times/teams
+    match_info = {}
+    if tournament_data:
+        for m in tournament_data.get('matches', []):
+            if m.get('matchId') == match_id:
+                match_info = m
+                break
+
+    event_id = str(tournament_data['event']['eventId']) if tournament_data else ''
+
+    payload = {
+        'aesEventId': event_id,
+        'match': {
+            'matchId':   match_id,
+            'division':  match_info.get('divisionName', ''),
+            'courtName': match_info.get('courtName', ''),
+            'startTime': _eastern_naive(match_info.get('startTime', '')),
+            'endTime':   _eastern_naive(match_info.get('endTime', '')),
+            'team1':     match_info.get('team1', ''),
+            'team2':     match_info.get('team2', ''),
+            'workTeam':  None,
+            'hasResult': outcome_code in ('1', '2', '3', '4', '5'),
+            'sets':      set_scores,
+            'outcome':   outcome_map.get(outcome_code, 'Undecided'),
+        },
+    }
+    url = base_url.rstrip('/') + '/delta'
+    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'delta'), daemon=True).start()
+
+
+def push_snapshot(tournament_data, base_url, ingest_key, timeout):
+    """POST full tournament state to /api/ingest/snapshot."""
+    if not base_url or not tournament_data:
+        return
+    event_id = str(tournament_data['event']['eventId'])
+    payload = {
+        'aesEventId':    event_id,
+        'snapshotTime':  datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
+        'pools':         [_pool_payload(p) for p in tournament_data.get('pools', [])],
+    }
+    url = base_url.rstrip('/') + '/snapshot'
+    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot'), daemon=True).start()
 
 # ── Remote entry formatter ─────────────────────────────────────────────────────
 
@@ -361,15 +490,15 @@ def show_update(data, raw_size, n, changes):
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def monitor(cfg):
-    host     = cfg.get('aes', 'host',     fallback='127.0.0.1')
-    port     = cfg.getint('aes', 'port',  fallback=17471)
-    password = cfg.get('aes', 'password', fallback='')
-    endpoint = cfg.get('dashboard', 'endpoint', fallback='').strip()
-    token    = cfg.get('dashboard', 'token',    fallback='').strip()
-    timeout  = cfg.getint('dashboard', 'timeout', fallback=10)
+    host        = cfg.get('aes', 'host',     fallback='127.0.0.1')
+    port        = cfg.getint('aes', 'port',  fallback=17471)
+    password    = cfg.get('aes', 'password', fallback='')
+    base_url    = cfg.get('dashboard', 'endpoint',    fallback='').strip()
+    ingest_key  = cfg.get('dashboard', 'ingest_key',  fallback='').strip()
+    timeout     = cfg.getint('dashboard', 'timeout',  fallback=10)
 
     # Resolve bridge path relative to script directory
-    bridge_rel = cfg.get('bridge', 'exe', fallback=r'bin\Release\net48\AESBridge.exe')
+    bridge_rel = cfg.get('bridge', 'exe', fallback=r'..\bridge\bin\Release\net48\AESBridge.exe')
     bridge_exe = os.path.join(SCRIPT_DIR, bridge_rel)
     if not os.path.exists(bridge_exe):
         log(f"WARNING: AESBridge.exe not found at {bridge_exe}")
@@ -381,7 +510,7 @@ def monitor(cfg):
     print(f"{'═'*62}")
     print(f"  AES:       {host}:{port}")
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")
-    print(f"  Dashboard: {endpoint or '(not configured — set in aes_config.ini)'}")
+    print(f"  Ingest:    {base_url or '(not configured — set in aes_config.ini)'}")
     print(f"  Press Ctrl+C to stop")
     print(f"{'─'*62}\n")
 
@@ -389,6 +518,7 @@ def monitor(cfg):
     update_num = 0
 
     while True:
+        last_snapshot = None  # reset on each new connection → always push snapshot on connect
         log(f"Connecting to {host}:{port}...")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -413,13 +543,12 @@ def monitor(cfg):
                     changes = diff(prev_data, curr)
                     show_update(curr, len(data), update_num, changes)
 
-                    # Push to dashboard
-                    if curr and endpoint:
-                        threading.Thread(
-                            target=push_to_dashboard,
-                            args=(curr, endpoint, token, timeout),
-                            daemon=True
-                        ).start()
+                    # Push snapshot on first connect or after interval has elapsed
+                    if curr and base_url:
+                        now = datetime.datetime.now(datetime.timezone.utc)
+                        if last_snapshot is None or (now - last_snapshot).total_seconds() >= SNAPSHOT_INTERVAL:
+                            push_snapshot(curr, base_url, ingest_key, timeout)
+                            last_snapshot = now
 
                     prev_data = curr
 
@@ -430,6 +559,10 @@ def monitor(cfg):
                         print(f"  [{ts()}]{change}")
                     else:
                         log(f"RemoteEntryUpdate ({len(data)} bytes)")
+
+                    # Push delta immediately
+                    if obj and base_url:
+                        push_delta(obj, prev_data, base_url, ingest_key, timeout)
 
                 elif cc in (CMD_FINISHED_PLAYS, CMD_PRINTABLE_MATCHES,
                             CMD_PRINTABLE_PLAYS, CMD_AUTO_PRINT_MATCHES):

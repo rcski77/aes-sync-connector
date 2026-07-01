@@ -308,7 +308,7 @@ class AESBridge
 
     static string PoolJson(Pool pool)
     {
-        string divCode = "", divName = "", poolName = "";
+        string divCode = "", divName = "", poolName = "", shortName = "", courtName = "", date = "";
         try
         {
             var div = pool.OwningGroup?.OwningRound?.OwningDivision;
@@ -317,8 +317,17 @@ class AESBridge
                 divCode = div.CodeAlias ?? "";
                 divName = div.DescriptionAlias ?? "";
             }
-            poolName = RStr(pool, "Name");
+            poolName  = RStr(pool, "Name");
             if (string.IsNullOrEmpty(poolName)) poolName = pool.CompleteShortName ?? "";
+            shortName = pool.CompleteShortName ?? "";
+
+            // Derive courtName and date from the first scheduled match in the pool
+            var first = pool.Matches?.FirstOrDefault(m => m.IsScheduled);
+            if (first != null)
+            {
+                courtName = first.ScheduledCourtText ?? "";
+                date      = first.ScheduledStartDateTime.ToString("yyyy-MM-dd");
+            }
         }
         catch { }
 
@@ -327,8 +336,11 @@ class AESBridge
         var sb = new StringBuilder("{");
         sb.Append($"\"poolId\":       {pool.PlayID}, ");
         sb.Append($"\"name\":         {S(poolName)}, ");
+        sb.Append($"\"shortName\":    {S(shortName)}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
+        sb.Append($"\"courtName\":    {S(courtName)}, ");
+        sb.Append($"\"date\":         {S(date)}, ");
         sb.Append("\"standings\": [");
         for (int i = 0; i < standings.Count; i++)
         {
