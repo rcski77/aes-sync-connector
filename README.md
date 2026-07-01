@@ -32,17 +32,14 @@ On connect, AES pushes a full tournament snapshot. Every subsequent score entry 
 build.bat
 ```
 
-This installs PyInstaller and pycryptodome, compiles `aes_monitor.exe`, and assembles the `dist\` folder.
+Builds everything in one step:
+1. Compiles `AESBridge.exe` (.NET 4.8)
+2. Bundles `aes_monitor.exe` with PyInstaller
+3. Assembles `dist\` with all required files
 
 On first build, `dist\aes_config.ini` is created from the template. Fill in your values before deploying.
 
-> **Note:** `dotnet` must be on your PATH, or edit `build.bat` to use the full path:
-> `"C:\Program Files\dotnet\dotnet.exe"`
->
-> If you've changed `bridge\AESBridge.cs`, rebuild the bridge first:
-> ```bat
-> "C:\Program Files\dotnet\dotnet.exe" build bridge\AESBridge.csproj -c Release
-> ```
+> **Note:** Requires Python 3.9+ and .NET SDK on PATH. `build.bat` will look for `dotnet` on PATH first, then fall back to `C:\Program Files\dotnet\dotnet.exe`.
 
 ## Deploy
 

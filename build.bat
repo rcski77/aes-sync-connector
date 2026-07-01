@@ -8,6 +8,23 @@ echo.
 echo === AES Sync Connector — PyInstaller Build ===
 echo.
 
+:: Build AESBridge.exe (C# / .NET 4.8)
+where dotnet >nul 2>&1
+if %errorlevel% == 0 (
+    set DOTNET=dotnet
+) else if exist "%ProgramFiles%\dotnet\dotnet.exe" (
+    set DOTNET="%ProgramFiles%\dotnet\dotnet.exe"
+) else (
+    echo ERROR: dotnet not found. Install .NET SDK or add it to your PATH.
+    pause & exit /b 1
+)
+
+%DOTNET% build bridge\AESBridge.csproj -c Release --nologo -v quiet
+if errorlevel 1 (
+    echo ERROR: AESBridge build failed.
+    pause & exit /b 1
+)
+
 :: Ensure PyInstaller is installed
 python -m pip install --quiet pyinstaller pycryptodome
 if errorlevel 1 (
