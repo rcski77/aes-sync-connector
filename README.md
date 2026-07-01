@@ -59,6 +59,13 @@ Double-click `aes_monitor.exe` to run. No Python installation required on the ta
 
 Edit `aes_config.ini` — no rebuild needed after changes, just restart the exe.
 
+The dashboard can generate a per-event config with its own ingest API key —
+download it and drop it into the same folder as `aes_monitor.exe`. If no
+`aes_config.ini` is present, the monitor will automatically pick up a
+`connector-config-<eventId>.ini` file instead (fill in your AES host/port/
+password and bridge exe path the first time). Keep only one config file in
+the folder at a time.
+
 ```ini
 [aes]
 host     = 127.0.0.1        ; AES Scheduler host (127.0.0.1 if running on same machine)

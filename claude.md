@@ -60,6 +60,12 @@ python aes_monitor.py
 
 ## Config
 
+The monitor reads `aes_config.ini` if present; otherwise it falls back to a
+dashboard-downloaded `connector-config-<eventId>.ini` in the same folder
+(same `[aes]`/`[bridge]`/`[dashboard]` shape — the dashboard now generates
+this directly with a per-event `ingest_key`, so no format translation is
+needed). See `find_config_path()` in aes_monitor.py.
+
 **aes_config.ini** (in monitor/):
 ```ini
 [aes]

@@ -10,7 +10,11 @@ and POSTs structured data to the dashboard ingest API.
 cd "C:\Git Repos\aes-connector\monitor"
 python aes_monitor.py
 ```
-Reads `aes_config.ini` automatically. Loads `.env` from this folder first,
+Reads `aes_config.ini` automatically. If that file isn't present, falls back
+to a dashboard-downloaded `connector-config-<eventId>.ini` in this folder
+(via `find_config_path()`) — same `[aes]`/`[bridge]`/`[dashboard]` shape,
+just a per-event filename and `ingest_key`. Errors if more than one
+`connector-config-*.ini` is present. Loads `.env` from this folder first,
 then falls back to the parent directory (project root).
 
 ## Scripts

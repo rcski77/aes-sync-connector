@@ -5,11 +5,13 @@ AES Sync Monitor — production version
 Connects to AES Scheduler on port 17471, receives real-time tournament
 updates, parses them via AESBridge.exe, and POSTs JSON to your dashboard.
 
-Config: aes_config.ini (in the same folder as this script)
+Config: aes_config.ini (in the same folder as this script), or a
+dashboard-downloaded connector-config-<eventId>.ini if aes_config.ini
+isn't present.
 Usage:  python aes_monitor.py
 """
 
-import os, sys, socket, struct, hashlib, base64, gzip, zlib
+import os, sys, socket, struct, hashlib, base64, gzip, zlib, glob
 import subprocess, json, datetime, threading, time, re
 import configparser, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
@@ -29,13 +31,30 @@ else:
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
+def find_config_path():
+    """Look for aes_config.ini first, then fall back to a dashboard-downloaded
+    connector-config-<eventId>.ini dropped in the same folder unrenamed."""
+    default_path = os.path.join(_BASE_DIR, 'aes_config.ini')
+    if os.path.exists(default_path):
+        return default_path
+    matches = glob.glob(os.path.join(_BASE_DIR, 'connector-config-*.ini'))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        print(f"ERROR: Multiple connector-config-*.ini files found in {_BASE_DIR} — keep only one.")
+        sys.exit(1)
+    return default_path
+
+
 def load_config():
     cfg = configparser.ConfigParser()
-    cfg_path = os.path.join(_BASE_DIR, 'aes_config.ini')
+    cfg_path = find_config_path()
     if not os.path.exists(cfg_path):
         print(f"ERROR: Config file not found: {cfg_path}")
+        print(f"       Place aes_config.ini (or a downloaded connector-config-*.ini) in this folder.")
         sys.exit(1)
     cfg.read(cfg_path)
+    print(f"  Config:    {cfg_path}")
     return cfg
 
 # ── Constants ──────────────────────────────────────────────────────────────────
