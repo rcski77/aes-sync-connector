@@ -303,7 +303,7 @@ def _match_payload(m):
         'endTime':   _eastern_naive(m.get('endTime', '')),
         'team1':     m.get('team1', ''),
         'team2':     m.get('team2', ''),
-        'workTeam':  None,
+        'workTeam':  m.get('workTeam') or None,
         'hasResult': bool(m.get('decided')),
         'sets':      [{'ft': s['team1'], 'st': s['team2']} for s in m.get('sets', [])],
     }

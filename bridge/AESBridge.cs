@@ -289,6 +289,7 @@ class AESBridge
         sb.Append($"\"matchLength\":  {m.MatchLength}, ");
         sb.Append($"\"team1\":        {S(m.FirstTeamText)}, ");
         sb.Append($"\"team2\":        {S(m.SecondTeamText)}, ");
+        sb.Append($"\"workTeam\":     {S(m.WorkTeamText)}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
         sb.Append($"\"playName\":     {S(playName)}, ");
