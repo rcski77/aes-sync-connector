@@ -371,6 +371,8 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_hea
             if m.get('matchId') == match_id:
                 match_info = m
                 break
+        if not match_info:
+            log(f"WARNING: delta for matchId={match_id} not found in snapshot — bridge may have failed on last EventUpdate")
 
     event_id = str(tournament_data['event']['eventId']) if tournament_data else ''
 
@@ -559,7 +561,8 @@ def monitor(cfg):
                             push_snapshot(curr, base_url, ingest_key, timeout, cf_headers)
                             last_snapshot = now
 
-                    prev_data = curr
+                    if curr is not None:
+                        prev_data = curr
 
                 elif cc == CMD_REMOTE_ENTRY_UPDATE and data:
                     obj    = decode_remote_entry(data, bridge_exe)
