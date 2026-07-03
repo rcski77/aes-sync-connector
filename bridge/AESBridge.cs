@@ -357,7 +357,9 @@ class AESBridge
         catch { }
         courtsJson.Append("]");
 
-        var standings = ComputeStandings(pool);
+        List<Standing> standings;
+        try { standings = ComputeStandings(pool); }
+        catch { standings = new List<Standing>(); }
 
         var sb = new StringBuilder("{");
         sb.Append($"\"poolId\":       {pool.PlayID}, ");
@@ -522,11 +524,20 @@ class AESBridge
             d[k] += by;
         }
 
+        // Every team scheduled into the pool should appear in standings (with a
+        // 0-0 record) even before it has played — not just teams with a decided
+        // win/loss — so the roster doesn't shrink/disappear mid-pool-play.
+        var teams = new List<string>();
+        var seenTeams = new HashSet<string>();
+        void Reg(string t) { if (!string.IsNullOrEmpty(t) && seenTeams.Add(t)) teams.Add(t); }
+
         foreach (var m in pool.Matches ?? new Match[0])
         {
-            if (m.TypeOfOutcome == Match.OutcomeType.Undecided) continue;
             string t1 = m.FirstTeamText, t2 = m.SecondTeamText;
             if (string.IsNullOrEmpty(t1) || string.IsNullOrEmpty(t2)) continue;
+            Reg(t1); Reg(t2);
+
+            if (m.TypeOfOutcome == Match.OutcomeType.Undecided) continue;
 
             if (m.FirstTeamWon)  { Inc(wins, t1); Inc(losses, t2); }
             if (m.SecondTeamWon) { Inc(wins, t2); Inc(losses, t1); }
@@ -544,8 +555,6 @@ class AESBridge
 
         int G(Dictionary<string, int> d, string k) => d.TryGetValue(k, out var v) ? v : 0;
 
-        // Collect all team names that appeared in pool matches
-        var teams = wins.Keys.Union(losses.Keys).Distinct().ToList();
         return teams
             .Select(t => new Standing { Team=t, Wins=G(wins,t), Losses=G(losses,t),
                                       SetsWon=G(sw,t), SetsLost=G(sl,t), PtsFor=G(pf,t), PtsAgainst=G(pa,t) })
