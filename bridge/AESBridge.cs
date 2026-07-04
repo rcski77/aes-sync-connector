@@ -531,11 +531,26 @@ class AESBridge
         var seenTeams = new HashSet<string>();
         void Reg(string t) { if (!string.IsNullOrEmpty(t) && seenTeams.Add(t)) teams.Add(t); }
 
-        foreach (var m in pool.Matches ?? new Match[0])
+        var allMatches = (pool.Matches ?? new Match[0])
+            .Where(m => !string.IsNullOrEmpty(m.FirstTeamText) && !string.IsNullOrEmpty(m.SecondTeamText))
+            .ToArray();
+
+        foreach (var m in allMatches) { Reg(m.FirstTeamText); Reg(m.SecondTeamText); }
+
+        // A pool with n teams has exactly n*(n-1)/2 regular round-robin matches.
+        // When a pool ends in a tie, AES schedules an extra physical tiebreaker
+        // match tagged with the same pool PlayID — it shows up in pool.Matches
+        // alongside the regular matches but must NOT count toward standings.
+        // It's always scheduled after the regular matches complete, so taking
+        // the first n*(n-1)/2 matches by start time excludes it.
+        int expectedRegularMatches = teams.Count * (teams.Count - 1) / 2;
+        var regularMatches = expectedRegularMatches > 0
+            ? allMatches.OrderBy(m => m.ScheduledStartDateTime).Take(expectedRegularMatches)
+            : allMatches;
+
+        foreach (var m in regularMatches)
         {
             string t1 = m.FirstTeamText, t2 = m.SecondTeamText;
-            if (string.IsNullOrEmpty(t1) || string.IsNullOrEmpty(t2)) continue;
-            Reg(t1); Reg(t2);
 
             if (m.TypeOfOutcome == Match.OutcomeType.Undecided) continue;
 
