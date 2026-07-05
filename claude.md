@@ -228,6 +228,9 @@ the monitor transforms it into the ingest API payload shape before POSTing.
     "matchId", "courtId", "courtName", "startTime", "endTime", "matchLength",
     "team1", "team2", "workTeam",   // workTeam is null if not assigned
     "divisionCode", "divisionName", "playId", "playName",
+    // playId is the pool's or bracket's PlayID — for playType "playoff" (a pool's
+    // own internal tiebreaker bracket), this is the OWNING POOL's PlayID, not the
+    // tiebreaker bracket's own (separate) PlayID, so it groups with the pool's matches
     "playType",     // "pool" | "bracket" | "playoff"
     "outcome",      // "Undecided" | "FirstTeamWon" | "SecondTeamWon" | etc.
     "decided",      // bool

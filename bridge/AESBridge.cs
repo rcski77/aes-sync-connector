@@ -265,7 +265,18 @@ class AESBridge
                 divCode = div.CodeAlias ?? "";
                 divName = div.DescriptionAlias ?? "";
             }
-            playId = RInt(m.OwningPlay, "PlayID");
+            if (m.OwningPlay is Bracket tieBracket && tieBracket.IsPlayoff)
+            {
+                // This match belongs to a pool's own internal tiebreaker bracket
+                // (Pool.PlayoffBracket) — attribute it to the owning pool's PlayID
+                // instead of the tiebreaker bracket's own separate PlayID, so
+                // downstream consumers can group it with the pool's other matches.
+                playId = tieBracket.OwningPool.PlayID;
+            }
+            else
+            {
+                playId = RInt(m.OwningPlay, "PlayID");
+            }
             playName = RStr(m.OwningPlay, "Name");
             if (string.IsNullOrEmpty(playName)) playName = m.OwningPlay?.CompleteShortName ?? "";
             playType = m.OwningPlay is Pool    ? "pool"
