@@ -78,7 +78,7 @@ Confirmed present via reflection dump of EventScheduler_Release.exe:
 | `CompleteShortName` | string | e.g. "R1P1M1" |
 | `CompleteFullName` | string | e.g. "Round 1 Pool 1 Match 1" |
 | `IsScheduled` | bool | Only scheduled matches are included in output |
-| `OwningPlay` | Play | Pool or Bracket this match belongs to |
+| `OwningPlay` | Play | Pool or Bracket this match belongs to; `OwningPlay.PlayID` (via reflection, `RInt`) is the same ID as `pool.PlayID`/`bracket.PlayID` — used as `matches[].playId` |
 
 ## Known Pool Properties (AES.Scheduler.Model.Pool)
 
@@ -126,7 +126,7 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "startTime", "endTime",   // UTC ISO 8601
     "matchLength",            // minutes
     "team1", "team2", "workTeam",
-    "divisionCode", "divisionName", "playName", "playType",
+    "divisionCode", "divisionName", "playId", "playName", "playType",
     "outcome", "decided", "firstTeamWon",
     "scoreText",
     "sets": [{ "team1", "team2" }],   // only played sets (both scores present)

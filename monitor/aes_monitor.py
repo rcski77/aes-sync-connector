@@ -308,6 +308,7 @@ def _match_payload(m):
     """Map a tournament_data.json match dict to the ingest API match shape."""
     return {
         'matchId':   m.get('matchId'),
+        'playId':    m.get('playId'),
         'division':  m.get('divisionName', ''),
         'courtId':   m.get('courtId'),
         'courtName': m.get('courtName', ''),
@@ -399,6 +400,7 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_hea
         'aesEventId': event_id,
         'match': {
             'matchId':   match_id,
+            'playId':    match_info.get('playId'),
             'division':  match_info.get('divisionName', ''),
             'courtId':   match_info.get('courtId'),
             'courtName': match_info.get('courtName', ''),

@@ -140,6 +140,7 @@ Both functions spawn a daemon thread so they don't block the receive loop.
 
 ### `_match_payload(m)` → ingest match shape
 Maps a `tournament_data.json` match dict:
+- `playId`: pool/bracket PlayID, passed through from bridge output
 - `courtId`: passed through from bridge output
 - `sets`: `{"team1": x, "team2": y}` → `{"ft": x, "st": y}`
 - `startTime`/`endTime`: UTC ISO 8601 → Eastern local, no offset (via `_eastern_naive`)

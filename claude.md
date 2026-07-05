@@ -200,7 +200,7 @@ the monitor transforms it into the ingest API payload shape before POSTing.
   "matches": [{
     "matchId", "courtId", "courtName", "startTime", "endTime", "matchLength",
     "team1", "team2", "workTeam",   // workTeam is null if not assigned
-    "divisionCode", "divisionName", "playName",
+    "divisionCode", "divisionName", "playId", "playName",
     "playType",     // "pool" | "bracket" | "playoff"
     "outcome",      // "Undecided" | "FirstTeamWon" | "SecondTeamWon" | etc.
     "decided",      // bool
@@ -252,6 +252,7 @@ through (signals a score was cleared). Single match only.
   "aesEventId": "33281",
   "match": {
     "matchId": -51376,
+    "playId": -61133,       // pool/bracket PlayID the match belongs to
     "division": "17 Open",
     "courtId": -64759,
     "courtName": "North 14",

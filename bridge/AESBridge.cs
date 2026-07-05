@@ -251,6 +251,7 @@ class AESBridge
     {
         // Division / play info via reflection (internal in binary)
         string divCode  = "", divName = "", playName = "", playType = "";
+        int playId = -1;
         try
         {
             var div = m.OwningPlay?.OwningGroup?.OwningRound?.OwningDivision;
@@ -259,6 +260,7 @@ class AESBridge
                 divCode = div.CodeAlias ?? "";
                 divName = div.DescriptionAlias ?? "";
             }
+            playId = RInt(m.OwningPlay, "PlayID");
             playName = RStr(m.OwningPlay, "Name");
             if (string.IsNullOrEmpty(playName)) playName = m.OwningPlay?.CompleteShortName ?? "";
             playType = m.OwningPlay is Pool    ? "pool"
@@ -292,6 +294,7 @@ class AESBridge
         sb.Append($"\"workTeam\":     {S(m.WorkTeamText)}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
+        sb.Append($"\"playId\":       {playId}, ");
         sb.Append($"\"playName\":     {S(playName)}, ");
         sb.Append($"\"playType\":     {S(playType)}, ");
         sb.Append($"\"outcome\":      {S(m.TypeOfOutcome.ToString())}, ");
