@@ -451,17 +451,62 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_hea
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'delta', cf_headers), daemon=True).start()
 
 
+def _bracket_node_payload(node):
+    """Map a tournament_data.json bracket roots[]/topSource/bottomSource node to the
+    ingest API bracket match-node shape. Recurses through the full tree (not just
+    final + semis) since the bracket-tree flyout UI needs every round's wiring."""
+    if not node:
+        return None
+    m = node.get('match') or {}
+    outcome = m.get('outcome', 'Undecided')
+    return {
+        'matchId':            m.get('matchId'),
+        'matchName':          m.get('fullName', ''),
+        'firstTeam':          m.get('team1', ''),
+        'secondTeam':         m.get('team2', ''),
+        'firstTeamWon':       bool(m.get('firstTeamWon')),
+        'secondTeamWon':      outcome == 'SecondTeamWon',
+        'court':              m.get('courtName', ''),
+        'scheduledStartTime': _eastern_naive(m.get('startTime', '')),
+        'topSource':          _bracket_node_payload(node.get('topSource')),
+        'bottomSource':       _bracket_node_payload(node.get('bottomSource')),
+    }
+
+
+def _bracket_payload(b):
+    """Map a tournament_data.json bracket dict to the ingest API brackets[] shape.
+    Returns None (caller skips) for pool-owned tiebreaker brackets (isPlayoff —
+    see IsFromPlayoffBracket in bridge/CLAUDE.md, these aren't real divisional
+    brackets) and for brackets AES hasn't seeded yet (no root match)."""
+    if b.get('isPlayoff'):
+        return None
+    roots = b.get('roots') or []
+    if not roots or not roots[0].get('match'):
+        return None
+    root = _bracket_node_payload(roots[0])
+    return {
+        'division':         b.get('divisionName', ''),
+        'date':             (root.get('scheduledStartTime') or '').split('T')[0],
+        'bracketFullName':  b.get('fullName') or b.get('name', ''),
+        'bracketShortName': b.get('name') or b.get('shortName', ''),
+        'root':             root,
+    }
+
+
 def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None):
     """POST full tournament state to /api/ingest/snapshot."""
     if not base_url or not tournament_data:
         return
     event_id = str(tournament_data['event']['eventId'])
+    brackets = [bp for b in tournament_data.get('brackets', [])
+                if (bp := _bracket_payload(b)) is not None]
     payload = {
         'aesEventId':    event_id,
         'aesEventIdKey': _event_id_key(tournament_data),
         'snapshotTime':  datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
         'pools':         [_pool_payload(p) for p in tournament_data.get('pools', [])],
+        'brackets':      brackets,
     }
     url = base_url.rstrip('/') + '/snapshot'
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot', cf_headers), daemon=True).start()

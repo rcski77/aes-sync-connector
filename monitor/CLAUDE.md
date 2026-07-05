@@ -175,6 +175,22 @@ Maps a pool dict; computes per-team fields not in `tournament_data.json`:
 - `goldSpotsCount`: always `None` (not yet available from AES assembly)
 - team `name`: seed suffix stripped via `_strip_seed()`
 
+### `_bracket_payload(b)` / `_bracket_node_payload(node)` → ingest brackets[] shape
+Maps a `tournament_data.json` bracket dict (already walked via `Bracket.PlotMatchPositions()`
+in the bridge — no C# changes needed) to the dashboard's `docs/bracket-ingest-spec.md` shape:
+- Returns `None` (caller skips the entry) for pool-owned tiebreaker brackets (`b['isPlayoff']`
+  — see `IsFromPlayoffBracket` in bridge/CLAUDE.md) and for brackets with no root match yet
+  (AES hasn't seeded that round)
+- `bracketFullName`/`bracketShortName`: forward `fullName`/`name` (or `shortName` fallback)
+  from the bridge unmodified — e.g. real data shows `name` as `"R4Gold"` (round-prefixed, not
+  a bare `"Gold"`); per the spec, send exactly what AES gives, don't normalize
+- `date`: Eastern date (via `_eastern_naive`, date portion only) of the **root** (final) match's
+  `startTime` — not the earliest match in the tree
+- `root`: recursively built via `_bracket_node_payload()`, which walks `topSource`/`bottomSource`
+  all the way to leaf (first-round) matches, not just final + semis
+- `secondTeamWon`: not a field the bridge emits for bracket match nodes — derived here as
+  `outcome == 'SecondTeamWon'`
+
 ### `_eastern_naive(iso_str)` → "YYYY-MM-DDTHH:MM:SS"
 Converts UTC ISO 8601 string to Eastern local time without offset.
 Uses `zoneinfo.ZoneInfo('America/New_York')` (Python 3.9+); falls back to

@@ -334,9 +334,30 @@ Full tournament state — dashboard upserts everything and deletes absences.
       "pointRatio": 1.42,   // ptsFor/ptsAgainst, null if no points against
       "finishRank": 1       // 1-indexed from standings order
     }]
+  }],
+  "brackets": [{
+    "division": "15 Classic",
+    "date": "2026-07-01",           // Eastern date of the root (final) match's scheduledStartTime
+    "bracketFullName": "Round 4 Championship Division",  // Bracket.CompleteFullName, unmodified
+    "bracketShortName": "R4Gold",    // Bracket.Name (or CompleteShortName fallback), unmodified —
+                                      // sent exactly as AES gives it, not normalized to bare "Gold"
+    "root": {
+      "matchId": -52833, "matchName": "Round 4 Championship Division Match 15",
+      "firstTeam": "Winner of Match 13", "secondTeam": "Winner of Match 14",
+      "firstTeamWon": false, "secondTeamWon": false,
+      "court": "North 77", "scheduledStartTime": "2026-07-01T15:00:00",
+      "topSource": { ...recursive, full tree down to leaf matches... },
+      "bottomSource": { ...recursive... }
+    }
   }]
 }
 ```
+Bracket entries are built from AESBridge's own `brackets[]` field in `tournament_data.json`
+(already walks `Bracket.PlotMatchPositions()` — no bridge changes needed for this). The monitor
+skips pool-owned tiebreaker brackets (`isPlayoff` — see `IsFromPlayoffBracket` above, these
+aren't real divisional brackets) and any bracket AES hasn't seeded yet (no root match). Sent
+per the dashboard's `docs/bracket-ingest-spec.md`, added to unblock the Reports tab / bracket
+tree UI when AES's own `plays/{date}` endpoint is Cloudflare-blocked.
 
 **Time handling:** AESBridge emits UTC ISO 8601. The monitor converts to Eastern local
 time (no offset) using `zoneinfo.ZoneInfo('America/New_York')`, with a fixed -5h fallback
@@ -373,7 +394,7 @@ AESBridge.exe
 Dashboard server (aes-tourney-director, Node.js/Express)
 ─────────────────────────────────────────────────────────
 POST /api/ingest/delta     ← upserts single match result
-POST /api/ingest/snapshot  ← upserts all matches + pools, deletes absences
+POST /api/ingest/snapshot  ← upserts all matches + pools + brackets, deletes absences
 Auth: Authorization: Bearer <INGEST_API_KEY>
 ```
 
