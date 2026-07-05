@@ -151,6 +151,18 @@ Maps a `tournament_data.json` match dict:
 Strips trailing region/seed suffix ` (XX)` (1–3 uppercase letters) from team names.
 Applied to pool standings. e.g. `"Sky High 17 Elite (GL)"` → `"Sky High 17 Elite"`.
 
+### `_server_safe_key(event_id, manual_addition, event_name)` → AES web API event ID string
+Derives AES's web-facing event ID string (e.g. `"PTAwMDAwNDUwMjk90"`) from the numeric
+`eventId` — this string isn't stored anywhere in the local SchedulerFile binary, it's a
+deterministic encoding: zero-pad the ID into `"=0000033281="` (or, for manually-added events,
+use the alphanumeric event name instead), base64-encode, strip `=` padding, substitute
+`+`→`-`/`/`→`_` for URL-safety, append one length-checksum character. Ported from an
+independent reverse-engineering of the same protocol (`gavin-aes-scripts/aes_vsf.py`) and
+verified against both his sample data and this project's real event data. `_event_id_key()`
+wraps it, pulling `eventId`/`manualAddition`/`name` out of a `tournament_data.json` dict and
+returning `None` if `eventId` is missing. Used to populate `aesEventIdKey` in both the delta
+and snapshot payloads, alongside the existing numeric `aesEventId`.
+
 ### `_pool_payload(p)` → ingest pool shape
 Maps a pool dict; computes per-team fields not in `tournament_data.json`:
 - `courtId`: first court from `courts` array (required scalar by dashboard schema)
@@ -194,5 +206,5 @@ On each new connection:
 
 ## Outstanding / Known Gaps
 - **goldSpotsCount** always `None` — see bridge/CLAUDE.md for investigation notes.
-- **aesEventId** — connector sends numeric `eventId` integer. Dashboard `Event` table must
-  store this numeric ID for ingest endpoint matching (web API string ID is not in the local binary).
+- ~~**aesEventId**~~ — **Resolved.** The connector now also sends `aesEventIdKey` (the derived
+  AES web API string ID) alongside the numeric `aesEventId` — see `_server_safe_key()` above.

@@ -9,6 +9,19 @@ a 3-minute polling interval with ~2-second live updates.
 ## Repo Location
 C:\Git Repos\aes-connector
 
+## Reference Material
+`C:\Git Repos\aes-decompiled\` — full decompiled EventScheduler.exe source,
+used to verify assembly properties before wiring them into AESBridge.cs. See
+`aes-decompiled/CLAUDE.md` (navigation + gotchas) and
+`aes-decompiled/MODEL_REFERENCE.md` (exhaustive class/enum reference,
+including properties not yet extracted by this connector). Check there before
+assuming a property doesn't exist or reflecting blindly.
+
+`C:\Git Repos\gavin-aes-scripts\` — an independent reverse-engineering of the
+same protocol/binary format by someone else, targeting AES's cloud sync
+service. Useful as a cross-check; its `_server_safe_key()`-equivalent logic
+is where `aesEventIdKey` derivation (see below) originally came from.
+
 ## Folder Structure
 ```
 aes-connector/
@@ -152,18 +165,32 @@ PlasmaDisplayModeSelected= 12288   // Only needed for display protocol (port 192
 ---
 
 ## RemoteEntryUpdateAttached Payload Format
-BinaryFormatter-serialized String[] — decoded via AESBridge.exe --remote flag:
+BinaryFormatter-serialized String[] — decoded via AESBridge.exe --remote flag.
+
+**Correction (verified against decompiled `Match.GetMatchSerialization()`,
+`Match.cs:2107-2148`):** index `[1]` is a **hardcoded type discriminator**
+(`RemoteEntryUpdateType.MatchData = 33281`), not the event ID — it's always
+the literal `33281` regardless of which event you're monitoring. Indices `[4]`
+and `[5]` were also mislabeled; they're `WorkTeamNumber` and `TypeOfWorkTeam`
+respectively, not "match type"/"max set count". The connector's own decoder
+never reads `[1]`, `[4]`, or `[5]` so behavior is unaffected — only the
+documentation was wrong. See `aes-decompiled/MODEL_REFERENCE.md` for the full
+picture, including three *other* payload shapes AES can send through this
+same wire command (finish ranks, pool tiebreaker seeds, official assignments)
+that this connector doesn't currently distinguish from score updates.
+
 ```
 [0] File GUID          e.g. "10b81d5d-989d-4500-964c-699e9ecba383"
-[1] Event ID           e.g. "33281"
+[1] Type discriminator  always "33281" for score-entry payloads (RemoteEntryUpdateType.MatchData) — NOT the event ID
 [2] Match ID           e.g. "-51376"  (negative int = manually added match)
 [3] OutcomeType        "1"=FirstTeamWon, "2"=SecondTeamWon, "3"=Tie,
                        "4"=FirstTeamForfeit, "5"=SecondTeamForfeit
-[4] Match type         "1"=BestOf
-[5] Max set count      e.g. "5"
+[4] WorkTeamNumber     int — team number reference for work-team logic (not currently used by the connector)
+[5] TypeOfWorkTeam     int — Match.WorkTeamType enum value (not currently used by the connector)
 [6+] Set score pairs   team1score, team2score per set played
 ```
 Example: [guid, 33281, -51376, 1, 1, 5, 25, 10, 25, 12] = team1 won 25-10 25-12
+(the literal `33281` here is the type discriminator, not this event's ID)
 
 ---
 
@@ -250,6 +277,7 @@ through (signals a score was cleared). Single match only.
 ```json
 {
   "aesEventId": "33281",
+  "aesEventIdKey": "PTAwMDAwMzMyODE90",  // derived AES web API string ID (see note below)
   "match": {
     "matchId": -51376,
     "playId": -61133,       // pool/bracket PlayID the match belongs to
@@ -269,8 +297,10 @@ through (signals a score was cleared). Single match only.
 ```
 
 **Note:** `aesEventId` is the numeric `eventId` integer from the SchedulerFile (e.g. `"33281"`).
-The full AES web API string ID (e.g. `PTAwMDAwNDUwMjk90`) is not present in the local binary
-and cannot be read by the connector. The dashboard must store and match on the numeric ID.
+`aesEventIdKey` is the AES web API string ID (e.g. `"PTAwMDAwNDUwMjk90"`), **derived** by the
+monitor from the numeric ID (or event name, for manually-added events) — see the
+`aesEventIdKey derivation` note below. It is not a separate value read from AES; it's computed
+in Python. Both fields are sent so the dashboard can match on either.
 
 ### POST /api/ingest/snapshot
 Fires on first connect, then throttled to every 3 minutes (SNAPSHOT_INTERVAL = 180s).
@@ -278,6 +308,7 @@ Full tournament state — dashboard upserts everything and deletes absences.
 ```json
 {
   "aesEventId": "33281",
+  "aesEventIdKey": "PTAwMDAwMzMyODE90",
   "snapshotTime": "2025-06-28T17:00:00Z",
   "matches": [ ...same match shape as delta... ],
   "pools": [{
@@ -304,6 +335,16 @@ Full tournament state — dashboard upserts everything and deletes absences.
 **Time handling:** AESBridge emits UTC ISO 8601. The monitor converts to Eastern local
 time (no offset) using `zoneinfo.ZoneInfo('America/New_York')`, with a fixed -5h fallback
 if zoneinfo is unavailable.
+
+**aesEventIdKey derivation:** AES's web API event ID string isn't stored in the local
+SchedulerFile binary — it's derived from the numeric `eventId` (or, for manually-added
+events, from the event name) via a deterministic encoding: zero-pad the ID into
+`"=0000033281="`, base64-encode it, strip `=` padding, substitute `+`→`-`/`/`→`_` for
+URL-safety, then append one length-checksum character (`chr(48 + fullBase64Len - trimmedLen)`).
+Implemented as `_server_safe_key()` in `monitor/aes_monitor.py`, ported from an independent
+reverse-engineering of the same protocol (`gavin-aes-scripts/aes_vsf.py`) and verified against
+both his sample data and this project's own real event data (eventId `45029` →
+`"PTAwMDAwNDUwMjk90"`, matching the exact string previously used as an example in this file).
 
 ---
 
@@ -334,12 +375,18 @@ Auth: Authorization: Bearer <INGEST_API_KEY>
 
 ## Outstanding Issues
 1. **goldSpotsCount always null** — the number of teams advancing from each pool to gold
-   bracket is not yet extracted from the AES assembly. Needs investigation via reflection
-   to find the right property on Pool or its OwningGroup/OwningRound.
+   bracket is not yet extracted from the AES assembly. `Pool.PlayoffBracket.TeamCount` was
+   investigated and ruled out — that's the pool's own internal tiebreaker bracket (used to
+   resolve 2-3 way ties via head-to-head mini-bracket play, matches flagged
+   `Match.IsFromPlayoffBracket`), not a gold-bracket-advancement count. The real mechanism is
+   still unknown; likely involves cross-referencing `Division.FinalPlace` group names
+   (Gold/Silver/Bronze) against manual team seeding into a separate bracket, with no simple
+   discrete "spots count" field found so far.
 
-2. **aesEventId mismatch** — the connector sends the numeric `eventId` integer. The dashboard
-   `Event` table must store this numeric ID (in addition to or instead of the web API string
-   like `PTAwMDAwNDUwMjk90`) for the ingest endpoints to match successfully.
+2. ~~**aesEventId mismatch**~~ — **Resolved.** The connector now also sends `aesEventIdKey`,
+   the AES web API string ID (e.g. `PTAwMDAwNDUwMjk90`), derived from the numeric `eventId` via
+   `_server_safe_key()` in `monitor/aes_monitor.py`. See "aesEventIdKey derivation" above.
+   `aesEventId` (numeric) is still sent for backward compatibility.
 
 ## Context
 - Adam: tournament director, 20yr experience, ~150 events/yr, Midwest-focused

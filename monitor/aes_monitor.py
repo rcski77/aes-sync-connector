@@ -326,6 +326,36 @@ def _strip_seed(name):
     return re.sub(r'\s+\([A-Z]{1,3}\)$', '', name or '').strip()
 
 
+def _server_safe_key(event_id, manual_addition, event_name):
+    """Derive AES's web API event ID string (e.g. 'PTAwMDAwNDUwMzE90') from the
+    numeric eventId. Verified against gavin-aes-scripts sample data:
+    eventId 45031, manual_addition=False -> 'PTAwMDAwNDUwMzE90'."""
+    if manual_addition:
+        token = ''.join(ch for ch in (event_name or '') if ch.isalnum())
+    else:
+        token = f'={event_id:010d}='
+    data = token.encode('utf-8')
+    b64 = base64.b64encode(data).decode('ascii')
+    length = len(b64)
+    while length > 0 and b64[length - 1] == '=':
+        length -= 1
+    chars = []
+    for i in range(length):
+        c = b64[i]
+        chars.append('-' if c == '+' else '_' if c == '/' else c)
+    chars.append(chr(48 + len(b64) - length))
+    return ''.join(chars)
+
+
+def _event_id_key(tournament_data):
+    """Compute aesEventIdKey from a tournament_data.json dict, or None if unavailable."""
+    event_info = tournament_data.get('event', {}) if tournament_data else {}
+    event_id = event_info.get('eventId')
+    if event_id is None:
+        return None
+    return _server_safe_key(event_id, event_info.get('manualAddition', False), event_info.get('name', ''))
+
+
 def _pool_payload(p):
     """Map a tournament_data.json pool dict to the ingest API pool shape."""
     standings = p.get('standings', [])
@@ -394,10 +424,12 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_hea
         if not match_info:
             log(f"WARNING: delta for matchId={match_id} not found in snapshot — bridge may have failed on last EventUpdate")
 
-    event_id = str(tournament_data['event']['eventId']) if tournament_data else ''
+    event_info = tournament_data.get('event', {}) if tournament_data else {}
+    event_id = str(event_info['eventId']) if event_info.get('eventId') is not None else ''
 
     payload = {
-        'aesEventId': event_id,
+        'aesEventId':    event_id,
+        'aesEventIdKey': _event_id_key(tournament_data),
         'match': {
             'matchId':   match_id,
             'playId':    match_info.get('playId'),
@@ -426,6 +458,7 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
     event_id = str(tournament_data['event']['eventId'])
     payload = {
         'aesEventId':    event_id,
+        'aesEventIdKey': _event_id_key(tournament_data),
         'snapshotTime':  datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
         'pools':         [_pool_payload(p) for p in tournament_data.get('pools', [])],

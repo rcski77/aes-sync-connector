@@ -190,12 +190,17 @@ class AESBridge
         sb.AppendLine($"    \"eventId\":     {sf.Event.EventID},");
         sb.AppendLine($"    \"startDate\":   {S(sf.Event.StartDate.ToString("yyyy-MM-dd"))},");
         sb.AppendLine($"    \"endDate\":     {S(sf.Event.EndDate.ToString("yyyy-MM-dd"))},");
-        sb.AppendLine($"    \"lastUpdated\": {S(sf.LastUpdatedTimestamp.ToString("o"))}");
+        sb.AppendLine($"    \"lastUpdated\": {S(sf.LastUpdatedTimestamp.ToString("o"))},");
+        sb.AppendLine($"    \"manualAddition\": {B(sf.Event.ManualAddition)}");
         sb.AppendLine("  },");
 
         // Courts
         AppendArray(sb, "courts", sf.Courts,
             c => $"{{\"courtId\": {c.CourtID}, \"name\": {S(c.Name)}}}");
+
+        // Divisions — final place groups (Gold/Silver/Bronze) and their seed resolution.
+        // Exploratory addition: Division.FinalPlaces is public, no reflection needed.
+        AppendArray(sb, "divisions", sf.Event.Divisions, DivisionJson);
 
         // Matches
         var matches = sf.Event.Matches
@@ -308,11 +313,25 @@ class AESBridge
         return sb.ToString();
     }
 
+    // ── Round ordering ─────────────────────────────────────────────────────
+    // Round.PreviousRound is public; walking it gives a reliable round order
+    // for backward seed-tracing (e.g. gold bracket -> feeder pools) without
+    // parsing naming conventions like the "R1"/"R2" prefix in CompleteShortName.
+
+    static int RoundIndex(AES.Scheduler.Model.Round round)
+    {
+        int idx = 0;
+        for (var r = round; r?.PreviousRound != null; r = r.PreviousRound) idx++;
+        return idx;
+    }
+
     // ── Pool ───────────────────────────────────────────────────────────────
 
     static string PoolJson(Pool pool)
     {
         string divCode = "", divName = "", poolName = "", shortName = "", date = "";
+        int roundIndex = -1;
+        string roundShortName = "", groupName = "", groupShortName = "";
         var courtsJson = new StringBuilder("[");
         try
         {
@@ -322,6 +341,14 @@ class AESBridge
                 divCode = div.CodeAlias ?? "";
                 divName = div.DescriptionAlias ?? "";
             }
+            var round = pool.OwningGroup?.OwningRound;
+            if (round != null)
+            {
+                roundShortName = round.ShortName ?? "";
+                roundIndex = RoundIndex(round);
+            }
+            groupName = pool.OwningGroup?.FullName ?? "";
+            groupShortName = pool.OwningGroup?.ShortName ?? "";
             poolName  = RStr(pool, "FullName");
             if (string.IsNullOrEmpty(poolName)) poolName = pool.CompleteFullName ?? pool.CompleteShortName ?? "";
             shortName = RStr(pool, "ShortName");
@@ -372,6 +399,10 @@ class AESBridge
         sb.Append($"\"divisionName\": {S(divName)}, ");
         sb.Append($"\"courts\":       {courtsJson}, ");
         sb.Append($"\"date\":         {S(date)}, ");
+        sb.Append($"\"roundShortName\": {S(roundShortName)}, ");
+        sb.Append($"\"roundIndex\":     {roundIndex}, ");
+        sb.Append($"\"groupName\":      {S(groupName)}, ");
+        sb.Append($"\"groupShortName\": {S(groupShortName)}, ");
         sb.Append("\"standings\": [");
         for (int i = 0; i < standings.Count; i++)
         {
@@ -387,6 +418,17 @@ class AESBridge
             sb.Append($"\"ptsAgainst\": {st.PtsAgainst}");
             sb.Append("}");
         }
+        sb.Append("], ");
+
+        // Exploratory addition: the pool's Play.TeamAssignment seed chain
+        // (EntrySeed -> FinishRank -> ExitSeed). Play.Teams is public, no reflection needed.
+        sb.Append("\"teamAssignments\": [");
+        var poolTeamAssignments = pool.Teams;
+        for (int i = 0; i < poolTeamAssignments.Length; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append(TeamAssignmentJson(poolTeamAssignments[i]));
+        }
         sb.Append("]}");
         return sb.ToString();
     }
@@ -400,6 +442,8 @@ class AESBridge
     {
         string divCode = "", divName = "", bracketName = "", notes = "";
         bool isPlayoff = false;
+        int roundIndex = -1;
+        string roundShortName = "", groupName = "", groupShortName = "";
         try
         {
             var div  = bracket.OwningGroup?.OwningRound?.OwningDivision;
@@ -409,6 +453,14 @@ class AESBridge
             if (string.IsNullOrEmpty(bracketName)) bracketName = bracket.CompleteShortName ?? "";
             isPlayoff = bracket.IsPlayoff;
             notes     = bracket.Notes ?? "";
+            var round = bracket.OwningGroup?.OwningRound;
+            if (round != null)
+            {
+                roundShortName = round.ShortName ?? "";
+                roundIndex = RoundIndex(round);
+            }
+            groupName = bracket.OwningGroup?.FullName ?? "";
+            groupShortName = bracket.OwningGroup?.ShortName ?? "";
         }
         catch { }
 
@@ -446,10 +498,77 @@ class AESBridge
         sb.Append($"\"divisionName\": {S(divName)}, ");
         sb.Append($"\"isPlayoff\":    {B(isPlayoff)}, ");
         sb.Append($"\"notes\":        {S(notes)}, ");
+        sb.Append($"\"roundShortName\": {S(roundShortName)}, ");
+        sb.Append($"\"roundIndex\":     {roundIndex}, ");
+        sb.Append($"\"groupName\":      {S(groupName)}, ");
+        sb.Append($"\"groupShortName\": {S(groupShortName)}, ");
         sb.Append($"\"matchCount\":   {bracket.Matches.Length}, ");
         sb.Append($"\"decided\":      {bracket.Matches.Count(m => m.TypeOfOutcome != Match.OutcomeType.Undecided)}, ");
-        sb.Append($"\"roots\": {rootsJson}");
+        sb.Append($"\"roots\": {rootsJson}, ");
+
+        // Exploratory addition: the bracket's Play.TeamAssignment seed chain
+        // (EntrySeed -> FinishRank -> ExitSeed). Play.Teams is public, no reflection needed.
+        sb.Append("\"teamAssignments\": [");
+        var bracketTeamAssignments = bracket.Teams;
+        for (int i = 0; i < bracketTeamAssignments.Length; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append(TeamAssignmentJson(bracketTeamAssignments[i]));
+        }
+        sb.Append("]");
         sb.Append("}");
+        return sb.ToString();
+    }
+
+    // ── Team assignment (seed chain) ──────────────────────────────────────
+    // Play.TeamAssignment: EntrySeed -> FinishRank (in this play) -> ExitSeed
+    // (becomes next round's EntrySeed). Shared by pools and brackets.
+
+    static string TeamAssignmentJson(Play.TeamAssignment ta)
+    {
+        string team = "";
+        try { team = ta.TeamText; } catch { }
+
+        var sb = new StringBuilder("{");
+        sb.Append($"\"teamNumber\": {ta.TeamNumber}, ");
+        sb.Append($"\"entrySeed\":  {N(ta.EntrySeed)}, ");
+        sb.Append($"\"finishRank\": {N(ta.FinishRank)}, ");
+        sb.Append($"\"reseedSeed\": {N(ta.ReseedSeed)}, ");
+        sb.Append($"\"exitSeed\":   {N(ta.ExitSeed)}, ");
+        sb.Append($"\"team\":       {S(team)}");
+        sb.Append("}");
+        return sb.ToString();
+    }
+
+    // ── Division ───────────────────────────────────────────────────────────
+    // Division.FinalPlaces: flat, director-assigned list of (GroupName, Seed)
+    // entries. Count of entries where GroupName == "Gold" is the gold-bracket
+    // advancement count — see WRITE_BACK_EDITOR_SCOPING.md for context.
+
+    static string DivisionJson(Division div)
+    {
+        var sb = new StringBuilder("{");
+        sb.Append($"\"divisionCode\": {S(div.CodeAlias)}, ");
+        sb.Append($"\"divisionName\": {S(div.DescriptionAlias)}, ");
+        sb.Append("\"finalPlaces\": [");
+        var finalPlaces = div.FinalPlaces;
+        for (int i = 0; i < finalPlaces.Length; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            var fp = finalPlaces[i];
+            string team = "";
+            try { team = fp.TeamText; } catch { }
+
+            sb.Append("{");
+            sb.Append($"\"absoluteRank\": {fp.AbsoluteRank}, ");
+            sb.Append($"\"groupName\":    {S(fp.GroupName)}, ");
+            sb.Append($"\"groupRank\":    {fp.GroupRank}, ");
+            sb.Append($"\"overallRank\":  {fp.OverallRank}, ");
+            sb.Append($"\"seed\":         {N(fp.Seed)}, ");
+            sb.Append($"\"team\":         {S(team)}");
+            sb.Append("}");
+        }
+        sb.Append("]}");
         return sb.ToString();
     }
 
@@ -540,16 +659,14 @@ class AESBridge
 
         foreach (var m in allMatches) { Reg(m.FirstTeamText); Reg(m.SecondTeamText); }
 
-        // A pool with n teams has exactly n*(n-1)/2 regular round-robin matches.
-        // When a pool ends in a tie, AES schedules an extra physical tiebreaker
-        // match tagged with the same pool PlayID — it shows up in pool.Matches
-        // alongside the regular matches but must NOT count toward standings.
-        // It's always scheduled after the regular matches complete, so taking
-        // the first n*(n-1)/2 matches by start time excludes it.
-        int expectedRegularMatches = teams.Count * (teams.Count - 1) / 2;
-        var regularMatches = expectedRegularMatches > 0
-            ? allMatches.OrderBy(m => m.ScheduledStartDateTime).Take(expectedRegularMatches)
-            : allMatches;
+        // Pool.Matches concatenates the pool's own round-robin matches with any
+        // matches from its internal tiebreaker bracket (Pool.PlayoffBracket) —
+        // used to resolve 2-3 way ties via head-to-head mini-bracket play, not
+        // to be confused with a division's actual playoff/gold bracket. Those
+        // tiebreaker matches must NOT count toward standings. IsFromPlayoffBracket
+        // identifies them exactly (same filter AES's own Play.TeamStats and
+        // Division.TeamStats use internally), instead of inferring by count.
+        var regularMatches = allMatches.Where(m => !m.IsFromPlayoffBracket);
 
         foreach (var m in regularMatches)
         {
