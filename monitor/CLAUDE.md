@@ -165,6 +165,8 @@ and snapshot payloads, alongside the existing numeric `aesEventId`.
 
 ### `_pool_payload(p)` → ingest pool shape
 Maps a pool dict; computes per-team fields not in `tournament_data.json`:
+- `shortName`: sends `fullShortName` (Pool.CompleteShortName, e.g. `"R2G1P5"`) in preference
+  to the bare `shortName` (e.g. `"P5"`) — the dashboard displays round/group context
 - `courtId`: first court from `courts` array (required scalar by dashboard schema)
 - `courtName`: first court name
 - `courts`: full array passed through (pools can span multiple courts)

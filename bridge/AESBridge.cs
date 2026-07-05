@@ -340,7 +340,7 @@ class AESBridge
 
     static string PoolJson(Pool pool)
     {
-        string divCode = "", divName = "", poolName = "", shortName = "", date = "";
+        string divCode = "", divName = "", poolName = "", shortName = "", fullShortName = "", date = "";
         int roundIndex = -1;
         string roundShortName = "", groupName = "", groupShortName = "";
         var courtsJson = new StringBuilder("[");
@@ -364,6 +364,10 @@ class AESBridge
             if (string.IsNullOrEmpty(poolName)) poolName = pool.CompleteFullName ?? pool.CompleteShortName ?? "";
             shortName = RStr(pool, "ShortName");
             if (string.IsNullOrEmpty(shortName)) shortName = pool.CompleteShortName ?? "";
+            // CompleteShortName = Round.ShortName + Group.ShortName + Pool.ShortName,
+            // e.g. "R2G1P5" — unlike `shortName` above (bare "P5"), this always includes
+            // round/group context, which the dashboard prefers to display.
+            fullShortName = pool.CompleteShortName ?? "";
 
             // Try to read Courts collection directly from the Pool/Play object
             bool gotCourts = false;
@@ -402,10 +406,36 @@ class AESBridge
         try { standings = ComputeStandings(pool); }
         catch { standings = new List<Standing>(); }
 
+        // Order by AES's own computed rank (Play.TeamAssignment.FinishRank), not our
+        // own win/set-diff/point-diff tiebreakers — AES applies additional rules
+        // (Set%, PT%, head-to-head, etc.) that we don't replicate, and the dashboard
+        // flags any mismatch between its own standings and what the connector sends.
+        // Falls back to the computed order for any team AES hasn't ranked yet.
+        try
+        {
+            var finishRankByTeam = new Dictionary<string, int>();
+            foreach (var ta in pool.Teams)
+            {
+                if (!ta.FinishRank.HasValue) continue;
+                string tt;
+                try { tt = ta.TeamText; } catch { continue; }
+                if (string.IsNullOrEmpty(tt)) continue;
+                finishRankByTeam[tt] = ta.FinishRank.Value;
+            }
+            if (finishRankByTeam.Count > 0)
+            {
+                standings = standings
+                    .OrderBy(s => finishRankByTeam.TryGetValue(s.Team, out var fr) ? fr : int.MaxValue)
+                    .ToList();
+            }
+        }
+        catch { }
+
         var sb = new StringBuilder("{");
         sb.Append($"\"poolId\":       {pool.PlayID}, ");
         sb.Append($"\"name\":         {S(poolName)}, ");
         sb.Append($"\"shortName\":    {S(shortName)}, ");
+        sb.Append($"\"fullShortName\": {S(fullShortName)}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
         sb.Append($"\"courts\":       {courtsJson}, ");
@@ -701,6 +731,9 @@ class AESBridge
 
         int G(Dictionary<string, int> d, string k) => d.TryGetValue(k, out var v) ? v : 0;
 
+        // This win/set-diff/point-diff order is only a fallback — PoolJson() re-sorts
+        // the result by AES's own Play.TeamAssignment.FinishRank when available, since
+        // AES's real tiebreak rules (Set%, PT%, H2H, etc.) aren't replicated here.
         return teams
             .Select(t => new Standing { Team=t, Wins=G(wins,t), Losses=G(losses,t),
                                       SetsWon=G(sw,t), SetsLost=G(sl,t), PtsFor=G(pf,t), PtsAgainst=G(pa,t) })

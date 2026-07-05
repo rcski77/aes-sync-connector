@@ -240,7 +240,9 @@ the monitor transforms it into the ingest API payload shape before POSTing.
     "shortName", "fullName"
   }],
   "pools": [{
-    "poolId", "name", "shortName", "divisionCode", "divisionName",
+    "poolId", "name", "shortName", "fullShortName", "divisionCode", "divisionName",
+    // fullShortName is Pool.CompleteShortName, e.g. "R2G1P5" (Round+Group+Pool) — the
+    // dashboard is sent this in place of shortName (see ingest schema below)
     "courts": [{ "courtId", "name" }],  // from Pool.Courts (reflection); fallback = first match court
     "date",         // "YYYY-MM-DD" from first scheduled match (UTC)
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
@@ -318,7 +320,8 @@ Full tournament state — dashboard upserts everything and deletes absences.
     "playId": 11111,
     "division": "17 Open",
     "name": "Pool 1",        // FullName from assembly, e.g. "Pool 1"
-    "shortName": "P1",       // ShortName from assembly, e.g. "P1"
+    "shortName": "R2G1P5",   // Pool.CompleteShortName (Round+Group+Pool), not the bare "P1" —
+                             // monitor sends fullShortName here in preference to plain shortName
     "courtId": -64759,       // first court ID (required by dashboard schema)
     "courtName": "North 14", // first court name
     "courts": [{ "courtId": -64759, "name": "North 14" }],  // full array (pools can span multiple courts)

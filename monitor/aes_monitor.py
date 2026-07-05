@@ -379,7 +379,7 @@ def _pool_payload(p):
         'playId':          p.get('poolId'),
         'division':        p.get('divisionName', ''),
         'name':            p.get('name', ''),
-        'shortName':       p.get('shortName', ''),
+        'shortName':       p.get('fullShortName') or p.get('shortName', ''),
         'courtId':         first_court.get('courtId'),
         'courtName':       first_court.get('name', ''),
         'courts':          courts,

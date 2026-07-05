@@ -145,8 +145,9 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
   }],
   "pools": [{
     "poolId",
-    "name",      // Pool.FullName (reflection), e.g. "Pool 1"; fallback: CompleteFullName
-    "shortName", // Pool.ShortName (reflection), e.g. "P1"; fallback: CompleteShortName
+    "name",          // Pool.FullName (reflection), e.g. "Pool 1"; fallback: CompleteFullName
+    "shortName",     // Pool.ShortName (reflection), e.g. "P1"; fallback: CompleteShortName
+    "fullShortName", // Pool.CompleteShortName always, e.g. "R2G1P5" (Round+Group+Pool) — dashboard prefers this
     "divisionCode", "divisionName",
     "courts": [{ "courtId", "name" }],  // Pool.Courts (reflection); fallback: single entry from first match
     "date",        // "YYYY-MM-DD" UTC, from first scheduled match
@@ -177,16 +178,27 @@ so the renderer knows the maximum set count. Top-level match `sets` only include
 ---
 
 ## Standings Computation
-Pool standings are computed by AESBridge from match results (not read from AES directly):
+Pool standings stats (wins/losses/sets/points) are computed by AESBridge from match results
+(not read from AES directly):
 - `pool.Matches` concatenates the pool's own round-robin matches with any matches from its
   internal tiebreaker bracket (`Pool.PlayoffBracket`) — the latter are excluded via
   `m.IsFromPlayoffBracket` before computing stats, mirroring AES's own internal filtering
 - Win/loss from `m.TypeOfOutcome`
 - Sets won/lost from comparing `s.FirstTeamScore` vs `s.SecondTeamScore` per set
 - Points for/against summed across all sets
-- Sorted: wins desc → set differential desc → point differential desc
 
-`finishRank` and `pointRatio` are computed by the monitor's `_pool_payload()`, not here.
+**Order**, however, is NOT our own win/set-diff/point-diff sort — that's only a fallback
+inside `ComputeStandings()`. `PoolJson()` re-sorts the final `standings` array by AES's own
+`Play.TeamAssignment.FinishRank` (public property on `pool.Teams`, matched by `TeamText`)
+whenever it's available. AES applies additional tiebreak rules (Set%, PT%, head-to-head,
+etc.) that aren't replicated here, and mismatches between the connector's computed order and
+AES's real Finish column showed up as ranking swaps the dashboard flags as discrepancies —
+deferring to AES's `FinishRank` for ordering avoids that entirely. Teams AES hasn't ranked
+yet fall back to the computed win/set-diff/point-diff order.
+
+The monitor's `_pool_payload()` then derives `finishRank` (per-team, in the ingest payload)
+as just the 1-indexed position in this `standings` array — so this ordering fix is the only
+place that needed to change; the monitor requires no updates.
 
 ---
 
