@@ -339,8 +339,8 @@ Full tournament state — dashboard upserts everything and deletes absences.
     "division": "15 Classic",
     "date": "2026-07-01",           // Eastern date of the root (final) match's scheduledStartTime
     "bracketFullName": "Round 4 Championship Division",  // Bracket.CompleteFullName, unmodified
-    "bracketShortName": "R4Gold",    // Bracket.Name (or CompleteShortName fallback), unmodified —
-                                      // sent exactly as AES gives it, not normalized to bare "Gold"
+    "bracketShortName": "Gold",      // Bracket.ShortName (bare — fallback: CompleteShortName
+                                      // e.g. "R4Gold" — if AES never populated ShortName)
     "root": {
       "matchId": -52833, "matchName": "Round 4 Championship Division Match 15",
       "firstTeam": "Winner of Match 13", "secondTeam": "Winner of Match 14",

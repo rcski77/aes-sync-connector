@@ -488,7 +488,7 @@ def _bracket_payload(b):
         'division':         b.get('divisionName', ''),
         'date':             (root.get('scheduledStartTime') or '').split('T')[0],
         'bracketFullName':  b.get('fullName') or b.get('name', ''),
-        'bracketShortName': b.get('name') or b.get('shortName', ''),
+        'bracketShortName': b.get('shortName') or b.get('name', ''),
         'root':             root,
     }
 

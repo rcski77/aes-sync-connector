@@ -108,11 +108,20 @@ result even though it's fully present and decided in the data.
 | Property | Notes |
 |---|---|
 | `PlayID` | Unique ID |
-| `CompleteShortName` / `CompleteFullName` | |
+| `FullName` | Bare name, e.g. `"Championship Division"` — internal, accessed via `RStr(bracket, "FullName")`; fallback `CompleteFullName` |
+| `ShortName` | Bare short name, e.g. `"Gold"` — internal, accessed via `RStr(bracket, "ShortName")`; fallback `CompleteShortName` |
+| `CompleteShortName` | Round-prefixed, e.g. `"R4Gold"` |
+| `CompleteFullName` | Round-prefixed, e.g. `"Round 4 Championship Division"` |
 | `IsPlayoff` | bool |
 | `Notes` | string |
 | `Matches` | Match[] |
 | `PlotMatchPositions()` | Returns `List<MatchPlacement>` with X/Y layout for bracket tree |
+
+**Verified against a real web-API response for the same bracket** (`PlayId -61004`, event 45032):
+`FullName: "Championship Division"`, `ShortName: "Gold"`, `CompleteShortName: "R4Gold"`,
+`CompleteFullName: "Round 4 Championship Division"`. Bracket is a `Play` subclass (same base
+as Pool), so it exposes the same bare-vs-complete distinction Pool does — see `FullName`/
+`ShortName` in the Pool table above.
 
 ## MatchPlacement Structure
 Returned by `Bracket.PlotMatchPositions()`:
@@ -154,7 +163,11 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
   }],
   "brackets": [{
-    "bracketId", "name", "shortName", "fullName",
+    "bracketId",
+    "name",          // Bracket.FullName (reflection), e.g. "Championship Division"; fallback: CompleteFullName
+    "shortName",     // Bracket.ShortName (reflection), e.g. "Gold"; fallback: CompleteShortName
+    "fullName",      // Bracket.CompleteFullName always, e.g. "Round 4 Championship Division"
+    "fullShortName", // Bracket.CompleteShortName always, e.g. "R4Gold" (Round+bracket short name)
     "divisionCode", "divisionName", "isPlayoff", "notes",
     "matchCount", "decided",
     "roots": [{

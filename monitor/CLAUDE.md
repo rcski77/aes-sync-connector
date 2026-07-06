@@ -177,13 +177,18 @@ Maps a pool dict; computes per-team fields not in `tournament_data.json`:
 
 ### `_bracket_payload(b)` / `_bracket_node_payload(node)` → ingest brackets[] shape
 Maps a `tournament_data.json` bracket dict (already walked via `Bracket.PlotMatchPositions()`
-in the bridge — no C# changes needed) to the dashboard's `docs/bracket-ingest-spec.md` shape:
+in the bridge) to the dashboard's `docs/bracket-ingest-spec.md` shape:
 - Returns `None` (caller skips the entry) for pool-owned tiebreaker brackets (`b['isPlayoff']`
   — see `IsFromPlayoffBracket` in bridge/CLAUDE.md) and for brackets with no root match yet
   (AES hasn't seeded that round)
-- `bracketFullName`/`bracketShortName`: forward `fullName`/`name` (or `shortName` fallback)
-  from the bridge unmodified — e.g. real data shows `name` as `"R4Gold"` (round-prefixed, not
-  a bare `"Gold"`); per the spec, send exactly what AES gives, don't normalize
+- `bracketFullName`: `fullName` (Bracket.CompleteFullName, e.g. `"Round 4 Championship Division"`)
+- `bracketShortName`: `shortName` (Bracket.ShortName, bare, e.g. `"Gold"`) — this required a
+  bridge fix (see bridge/CLAUDE.md's Bracket properties table): `BracketJson()` used to reflect
+  a nonexistent `"Name"` property and bind `bracket.CompleteShortName` to the `shortName` key,
+  so both `name` and `shortName` always emitted the round-prefixed `"R4Gold"` instead of the
+  bare `"Gold"` — confirmed by diffing against a real web-API response for the same bracket.
+  Fixed by reflecting `FullName`/`ShortName` for `name`/`shortName` and adding a new
+  `fullShortName` field for the round-prefixed `CompleteShortName` value.
 - `date`: Eastern date (via `_eastern_naive`, date portion only) of the **root** (final) match's
   `startTime` — not the earliest match in the tree
 - `root`: recursively built via `_bracket_node_payload()`, which walks `topSource`/`bottomSource`

@@ -481,7 +481,7 @@ class AESBridge
 
     static string BracketJson(Bracket bracket)
     {
-        string divCode = "", divName = "", bracketName = "", notes = "";
+        string divCode = "", divName = "", bracketName = "", bracketShortName = "", notes = "";
         bool isPlayoff = false;
         int roundIndex = -1;
         string roundShortName = "", groupName = "", groupShortName = "";
@@ -490,8 +490,17 @@ class AESBridge
             var div  = bracket.OwningGroup?.OwningRound?.OwningDivision;
             divCode  = div?.CodeAlias ?? "";
             divName  = div?.DescriptionAlias ?? "";
-            bracketName = RStr(bracket, "Name");
-            if (string.IsNullOrEmpty(bracketName)) bracketName = bracket.CompleteShortName ?? "";
+            // Bracket (a Play subclass, same as Pool) exposes bare FullName/ShortName
+            // reflection properties distinct from the round-prefixed CompleteFullName/
+            // CompleteShortName — e.g. FullName "Championship Division" vs CompleteFullName
+            // "Round 4 Championship Division"; ShortName "Gold" vs CompleteShortName "R4Gold".
+            // Previously this reflected a nonexistent "Name" property (always fell back to
+            // CompleteShortName), so "name" and "shortName" were both wrongly emitting the
+            // round-prefixed "R4Gold" instead of the bare "Championship Division"/"Gold".
+            bracketName = RStr(bracket, "FullName");
+            if (string.IsNullOrEmpty(bracketName)) bracketName = bracket.CompleteFullName ?? "";
+            bracketShortName = RStr(bracket, "ShortName");
+            if (string.IsNullOrEmpty(bracketShortName)) bracketShortName = bracket.CompleteShortName ?? "";
             isPlayoff = bracket.IsPlayoff;
             notes     = bracket.Notes ?? "";
             var round = bracket.OwningGroup?.OwningRound;
@@ -533,8 +542,9 @@ class AESBridge
         var sb = new StringBuilder("{");
         sb.Append($"\"bracketId\":    {bracket.PlayID}, ");
         sb.Append($"\"name\":         {S(bracketName)}, ");
-        sb.Append($"\"shortName\":    {S(bracket.CompleteShortName)}, ");
+        sb.Append($"\"shortName\":    {S(bracketShortName)}, ");
         sb.Append($"\"fullName\":     {S(bracket.CompleteFullName)}, ");
+        sb.Append($"\"fullShortName\": {S(bracket.CompleteShortName)}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
         sb.Append($"\"isPlayoff\":    {B(isPlayoff)}, ");
