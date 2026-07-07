@@ -23,20 +23,32 @@ gold_contention_model.md in project memory):
      that bracket is "gold" for this division, whatever it's actually named.
   3. Walk backward from Gold via breadth-first search: for every entrySeed of
      every play in the current frontier, find the play in the nearest
-     earlier round whose teamAssignment produced that value as an exitSeed
+     earlier round that could produce that value as one of its own exits
      (or further back still, if intervening rounds don't touch the seed at
      all — AES's own pass-through rule, Round.cs:264-274). Every play found
      this way is a "gold ancestor." This is NOT the same as tracing a single
      seed's identity back to one Round-1 pool (that model was tried first
      and confirmed wrong — it conflates a dominant seed simply never losing
      with an actual pool-to-pool contention count).
-  4. For each pool at each round, a finisher is "still in contention" if
-     their own next-round destination play (searched forward the same way,
-     skipping rounds that don't touch their exitSeed) is in the gold-ancestor
-     set. This correctly handles undersized pools that get cross-paired with
-     a sibling pool's crossover bracket (e.g. two 3-team pools where 2nd/3rd
-     place play the sibling pool's 3rd/2nd place for the remaining spot) —
-     verified against real "XO" crossover brackets in the data.
+
+     NOTE (2026-07-07): the search on both sides (here, and step 4) uses
+     entrySeed, not exitSeed. A play's own exitSeed multiset always equals
+     its own entrySeed multiset (barring reseeds) — AES only redistributes
+     the seed numbers a play already received among its own finishers, it
+     never invents new ones. entrySeed is structural (assigned when the
+     bracket/schedule is built) and available before any match in that play
+     is decided, unlike exitSeed (only assigned once standings are final).
+     An earlier version of this script used exitSeed throughout, which
+     produced 0 (not null) for every pool in a freshly-started event where
+     nothing had an exitSeed yet — see gold_contention_model.md's refinement
+     note in project memory.
+  4. For each pool at each round, a finisher slot is "still in contention" if
+     its next-round destination play (searched forward the same way, by
+     entrySeed) is in the gold-ancestor set. This correctly handles
+     undersized pools that get cross-paired with a sibling pool's crossover
+     bracket (e.g. two 3-team pools where 2nd/3rd place play the sibling
+     pool's 3rd/2nd place for the remaining spot) — verified against real
+     "XO" crossover brackets in the data.
 
 Usage:
     python aes_gold_contention.py [path-to-binary] [--bridge PATH] [--division CODE]
@@ -106,15 +118,22 @@ def find_dest_play(items, max_round, seed, from_round):
 
 
 def find_source_play(items, seed, from_round):
-    """Backward search: the play in the nearest earlier round whose
-    teamAssignment has this seed as its exitSeed. Skips rounds that don't
-    touch the seed (AES's pass-through rule)."""
+    """Backward search: the play in the nearest earlier round that could
+    produce this seed as one of its own exits. Searches entrySeed, not
+    exitSeed (see gold_contention_model.md's 2026-07-07 refinement): a
+    play's own exitSeed multiset always equals its own entrySeed multiset
+    (barring reseeds), and entrySeed is structural — known before any match
+    in that play is decided, unlike exitSeed (only assigned once standings
+    are final). Using exitSeed here made this whole model return 0 instead
+    of null for every pool in a freshly-started event, since nothing had an
+    exitSeed yet. Skips rounds that don't touch the seed (AES's pass-through
+    rule)."""
     r = from_round - 1
     while r >= 0:
         for it in items:
             if it['roundIndex'] == r:
                 for ta in it['teamAssignments']:
-                    if ta['exitSeed'] == seed:
+                    if ta['entrySeed'] == seed:
                         return it
         r -= 1
     return None
@@ -199,9 +218,10 @@ def analyze_division(data, division_code):
         for p in sorted(pools, key=lambda x: x['name']):
             in_contention = 0
             for ta in p['teamAssignments']:
-                if ta['exitSeed'] is None:
+                # entrySeed, not exitSeed — see find_source_play()'s docstring.
+                if ta['entrySeed'] is None:
                     continue
-                dest = find_dest_play(items, max_round, ta['exitSeed'], p['roundIndex'])
+                dest = find_dest_play(items, max_round, ta['entrySeed'], p['roundIndex'])
                 if dest and dest['id'] in gold_ancestors:
                     in_contention += 1
             by_group[p['groupShortName'] or '(no group)'].append(

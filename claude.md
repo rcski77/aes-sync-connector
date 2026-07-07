@@ -422,16 +422,25 @@ Auth: Authorization: Bearer <INGEST_API_KEY>
    (see `gold_contention_model.md` in project memory, confirmed against Adam's real data
    2026-07-05, and `monitor/aes_gold_contention.py`, the diagnostic script that established
    it): find the division's Gold bracket via `divisions[].finalPlaces` (the `absoluteRank==1`
-   entry's logic name / decided winner), backward-BFS from Gold across rounds via
-   entrySeed→exitSeed matching to build the full set of "gold ancestor" plays, then for each
-   pool, forward-trace each finisher's exitSeed to its actual next-round destination play and
-   count how many land in that ancestor set. Round-dependent (e.g. Round 1 might keep 3-of-4
-   per pool, Round 2 cuts to 2-of-4) — not a fixed ratio. Implemented in
-   `monitor/aes_monitor.py`'s `_compute_gold_spots()` (ported from `aes_gold_contention.py`),
-   computed once per snapshot from `divisions[]`/`pools[]`/`brackets[]` already in
-   `tournament_data.json` — no bridge changes needed beyond `roundIndex`/`groupShortName`/
-   `teamAssignments`, which already existed. `AESBridge.cs` itself still always emits
-   `goldSpotsCount: null` for this field; the monitor overwrites it in `_pool_payload()`.
+   entry's logic name / decided winner), backward-BFS from Gold across rounds via entrySeed
+   matching to build the full set of "gold ancestor" plays, then for each pool, forward-trace
+   each finisher slot's entrySeed to its actual next-round destination play and count how many
+   land in that ancestor set. Round-dependent (e.g. Round 1 might keep 3-of-4 per pool, Round 2
+   cuts to 2-of-4) — not a fixed ratio. Implemented in `monitor/aes_monitor.py`'s
+   `_compute_gold_spots()` (ported from `aes_gold_contention.py`), computed once per snapshot
+   from `divisions[]`/`pools[]`/`brackets[]` already in `tournament_data.json` — no bridge
+   changes needed beyond `roundIndex`/`groupShortName`/`teamAssignments`, which already existed.
+   `AESBridge.cs` itself still always emits `goldSpotsCount: null` for this field; the monitor
+   overwrites it in `_pool_payload()`.
+
+   **Second fix (2026-07-07):** the search originally used `exitSeed` (a specific team's
+   resolved seed once the pool's own standings are final), which meant a freshly-started event
+   with nothing played yet had every `exitSeed` null and silently returned `0` for every pool
+   instead of `null` — caught in production the day after shipping. Fixed by switching to
+   `entrySeed` throughout: a play's own exitSeed multiset is always the same set of values as
+   its own entrySeed multiset (barring reseeds), and entrySeed is structural — known as soon as
+   the bracket/schedule is built, not only after the pool is played. See
+   `gold_contention_model.md` in project memory for the full writeup.
 
 2. ~~**aesEventId mismatch**~~ — **Resolved.** The connector now also sends `aesEventIdKey`,
    the AES web API string ID (e.g. `PTAwMDAwNDUwMjk90`), derived from the numeric `eventId` via

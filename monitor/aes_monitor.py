@@ -389,15 +389,24 @@ def _find_dest_play(items, max_round, seed, from_round):
 
 
 def _find_source_play(items, seed, from_round):
-    """Backward search: the play in the nearest earlier round whose
-    teamAssignment has this seed as its exitSeed. Skips rounds that don't
-    touch the seed (AES's pass-through rule)."""
+    """Backward search: the play in the nearest earlier round that could
+    produce this seed as one of its own exits. Searches entrySeed, not
+    exitSeed: a play's own exitSeed multiset is always the same set of values
+    as its own entrySeed multiset (barring reseeds, out of scope here) — AES
+    redistributes the same seed numbers it received among its own finishers
+    once standings are known, never introduces new ones. entrySeed is
+    structural (assigned when the bracket/schedule is built) and available
+    before any match in that play is decided, unlike exitSeed (which requires
+    finish rank, i.e. the play to have actually been played). Verified
+    against real data: pool -60263's entrySeeds [14,49,76,111] and exitSeeds
+    [14,76,49,111] are the same set, just permuted across physical teams.
+    Skips rounds that don't touch the seed (AES's pass-through rule)."""
     r = from_round - 1
     while r >= 0:
         for it in items:
             if it['roundIndex'] == r:
                 for ta in it['teamAssignments']:
-                    if ta.get('exitSeed') == seed:
+                    if ta.get('entrySeed') == seed:
                         return it
         r -= 1
     return None
@@ -467,7 +476,17 @@ def _compute_gold_spots(tournament_data):
     Ported from the validated aes_gold_contention.py diagnostic — see
     gold_contention_model.md in project memory. NOT a per-division constant:
     a 4-team pool can have 0-4 teams still in contention depending on round
-    and how AES's own bracket structure was built."""
+    and how AES's own bracket structure was built.
+
+    Uses each finisher slot's entrySeed (the seed the pool itself received),
+    not exitSeed (the seed a specific physical team is assigned once
+    standings are final) — a pool's own exitSeed multiset is always the same
+    set of values as its own entrySeed multiset (barring reseeds), so
+    entrySeed gives the identical count while also being structural: known
+    as soon as the bracket/schedule is built, not only after the pool is
+    played. A first version used exitSeed and returned 0 (not null) for
+    every pool in a freshly-started event, because none of that event's
+    exitSeeds were assigned yet — Adam caught this in production."""
     result = {}
     for div in tournament_data.get('divisions', []):
         code = div.get('divisionCode')
@@ -492,14 +511,20 @@ def _compute_gold_spots(tournament_data):
             if it['type'] != 'pool':
                 continue
             in_contention = 0
+            resolved = False  # True once at least one finisher slot has a known seed
             for ta in it['teamAssignments']:
-                exit_seed = ta.get('exitSeed')
-                if exit_seed is None:
+                seed = ta.get('entrySeed')
+                if seed is None:
                     continue
-                dest = _find_dest_play(items, max_round, exit_seed, it['roundIndex'])
+                resolved = True
+                dest = _find_dest_play(items, max_round, seed, it['roundIndex'])
                 if dest and dest['id'] in gold_ancestors:
                     in_contention += 1
-            result[it['id']] = in_contention
+            # A pool with no entrySeed at all yet (e.g. a later-round bracket slot
+            # AES hasn't structurally seeded yet) stays unset -> null downstream,
+            # not 0 — 0 means "confirmed nobody from this pool advances."
+            if resolved:
+                result[it['id']] = in_contention
     return result
 
 

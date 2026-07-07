@@ -193,18 +193,36 @@ Model, per division:
 1. Find the Gold bracket via `divisions[].finalPlaces`' `absoluteRank == 1` entry — its logic
    name (`"Winner of R4GoldM15"`) or, once decided, its resolved winner team name — identifies
    which bracket root match produces the division's #1 finisher (`_find_gold_bracket_id()`).
-2. Backward BFS from that bracket (`_build_gold_ancestors()`): for every entrySeed of every
-   play in the frontier, find the play in the nearest earlier round whose teamAssignment
-   produced that value as an `exitSeed` (`_find_source_play()`, skipping rounds that don't
-   touch the seed — AES's own pass-through behavior). Every play reached this way is a "gold
+2. Backward BFS from that bracket (`_build_gold_ancestors()`): for every `entrySeed` of every
+   play in the frontier, find the play in the nearest earlier round that could have produced
+   that value as one of its own exits (`_find_source_play()`, skipping rounds that don't touch
+   the seed — AES's own pass-through behavior). Every play reached this way is a "gold
    ancestor."
-3. For each pool, each finisher's actual next-round destination (`_find_dest_play()`, forward
-   search by `entrySeed == exitSeed`) is checked against the gold-ancestor set
-   (`_compute_gold_spots()`); the count of finishers landing in that set is the pool's
+3. For each pool, each finisher slot's next-round destination (`_find_dest_play()`, forward
+   search by `entrySeed == entrySeed`) is checked against the gold-ancestor set
+   (`_compute_gold_spots()`); the count of slots landing in that set is the pool's
    `goldSpotsCount`.
 
+**Uses `entrySeed`, not `exitSeed`, on both sides of the search** — this was a second bug fix
+(2026-07-07) after a freshly-started live event showed `goldSpotsCount: 0` for every single
+pool. A pool's own `exitSeed` values require its standings to be final (AES only assigns which
+*physical team* gets which exit seed once the pool's matches are decided), so on a Round 1 pool
+with nothing played yet, every `exitSeed` is `null` — the original exitSeed-based version
+treated "no data yet" the same as "confirmed zero," silently emitting `0` instead of `null`.
+The fix: a play's own exitSeed *multiset* is always the same set of values as its own entrySeed
+multiset (barring reseeds, out of scope here) — AES only ever redistributes the seed numbers a
+play already received among its own finishers, never introduces new ones. `entrySeed` is
+structural (assigned when the bracket/schedule is built), so both `_find_source_play()` (backward)
+and the per-pool loop in `_compute_gold_spots()` (forward) now key off `entrySeed` throughout,
+making the whole computation available before a single match is played. Verified against real
+data both ways: pool `-60263`'s `entrySeed`s `[14,49,76,111]` and `exitSeed`s `[14,76,49,111]`
+are the same set just permuted, and re-running the computation with `exitSeed`/`finishRank`
+manually blanked out (simulating an unplayed pool) still produced the same correct count.
+Only a pool with **no** `entrySeed` at all yet (e.g. a bracket slot AES hasn't structurally
+seeded) stays unset in the result map, which `_pool_payload()` then sends as `null`.
+
 Uses `roundIndex`, `groupShortName` (not currently used but kept from the diagnostic script
-for parity), and `teamAssignments` (`entrySeed`/`exitSeed`/`finishRank`) already emitted by
+for parity), and `teamAssignments` (`entrySeed`/`finishRank`) already emitted by
 `PoolJson()`/`BracketJson()` in the bridge — no bridge changes were needed. Called once per
 snapshot in `push_snapshot()`, passed into every `_pool_payload()` call as `gold_spots_map`.
 
