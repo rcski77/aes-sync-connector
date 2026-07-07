@@ -162,7 +162,7 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "courts": [{ "courtId", "name" }],  // Pool.Courts (reflection); fallback: single entry from first match
     "date",        // "YYYY-MM-DD" UTC, from first scheduled match
     "goldSpotsCount", // always null here — bridge doesn't compute this, see goldSpotsCount note below
-    "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
+    "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst", "finishRank" }]
   }],
   "brackets": [{
     "bracketId",
@@ -202,18 +202,21 @@ Pool standings stats (wins/losses/sets/points) are computed by AESBridge from ma
 - Sets won/lost from comparing `s.FirstTeamScore` vs `s.SecondTeamScore` per set
 - Points for/against summed across all sets
 
-**Order**, however, is NOT our own win/set-diff/point-diff sort — that's only a fallback
-inside `ComputeStandings()`. `PoolJson()` re-sorts the final `standings` array by AES's own
-`Play.TeamAssignment.FinishRank` (public property on `pool.Teams`, matched by `TeamText`)
-whenever it's available. AES applies additional tiebreak rules (Set%, PT%, head-to-head,
-etc.) that aren't replicated here, and mismatches between the connector's computed order and
-AES's real Finish column showed up as ranking swaps the dashboard flags as discrepancies —
-deferring to AES's `FinishRank` for ordering avoids that entirely. Teams AES hasn't ranked
-yet fall back to the computed win/set-diff/point-diff order.
+**Order** is NOT our own win/set-diff/point-diff sort (that's only used as a lookup source,
+never emitted in that order) — and, as of 2026-07, it's also no longer sorted by AES's own
+`Play.TeamAssignment.FinishRank` either. `PoolJson()` used to re-sort by `FinishRank` so the
+connector's order would track AES's real finish order instead of our computed fallback, but
+*any* rank-based ordering reorders the array as a pool plays out, and the dashboard writes
+`teams` straight to the UI with no re-sort of its own — so a rank-sorted array made pool-
+flyout rows visibly reshuffle mid-pool for connector-fed events (see
+`connector-pool-fields-update.md` in the dashboard repo). `PoolJson()` now emits `standings`
+in `pool.Teams`' own roster order (the same never-reordered array used to build
+`teamAssignments`), looking up each team's computed stats by `TeamText` and attaching AES's
+real `FinishRank` (nullable — until AES has ranked that team) as a per-team `finishRank`
+field. That field is a display value only; it does not drive array order.
 
-The monitor's `_pool_payload()` then derives `finishRank` (per-team, in the ingest payload)
-as just the 1-indexed position in this `standings` array — so this ordering fix is the only
-place that needed to change; the monitor requires no updates.
+The monitor's `_pool_payload()` reads `finishRank` straight from each `standings` entry
+(no longer derived positionally from array index).
 
 ---
 

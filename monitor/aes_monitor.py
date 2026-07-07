@@ -531,19 +531,30 @@ def _compute_gold_spots(tournament_data):
 def _pool_payload(p, gold_spots_map=None):
     """Map a tournament_data.json pool dict to the ingest API pool shape."""
     standings = p.get('standings', [])
+    # teamAssignments carries AES's real exitSeed per team (null until AES has
+    # officially finalized the pool's standings in Scheduler) — keyed by the
+    # same raw TeamText used in standings[].team, so a direct name match joins
+    # them. Not derived/guessed here; passed through only once AES reports it.
+    exit_seed_by_team = {
+        ta.get('team'): ta.get('exitSeed')
+        for ta in p.get('teamAssignments', [])
+        if ta.get('team')
+    }
     teams = []
-    for rank, st in enumerate(standings, start=1):
+    for st in standings:
         pts_against = st.get('ptsAgainst', 0)
         pts_for     = st.get('ptsFor', 0)
         ratio = round(pts_for / pts_against, 4) if pts_against else None
+        raw_name = st.get('team', '')
         teams.append({
-            'name':        _strip_seed(st.get('team', '')),
+            'name':        _strip_seed(raw_name),
             'matchesWon':  st.get('wins', 0),
             'matchesLost': st.get('losses', 0),
             'setsWon':     st.get('setsWon', 0),
             'setsLost':    st.get('setsLost', 0),
             'pointRatio':  ratio,
-            'finishRank':  rank,
+            'finishRank':  st.get('finishRank'),
+            'exitSeed':    exit_seed_by_team.get(raw_name),
         })
     courts = p.get('courts') or []
     first_court = courts[0] if courts else {}

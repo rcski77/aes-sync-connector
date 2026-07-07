@@ -251,7 +251,11 @@ the monitor transforms it into the ingest API payload shape before POSTing.
     "goldSpotsCount", // AESBridge always emits null here — the real value is computed
                       // downstream by the monitor (_compute_gold_spots()), not the bridge;
                       // see goldSpotsCount note below
-    "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
+    "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst", "finishRank" }]
+    // order is AES's own stable pool.Teams roster order (never reorders as the pool plays
+    // out) — NOT a rank sort. finishRank is AES's real per-team FinishRank (nullable), a
+    // display-only field; it does not drive array order. See "Standings Computation" in
+    // bridge/CLAUDE.md.
   }],
   "brackets": [{
     "bracketId", "name", "shortName", "fullName",
@@ -340,12 +344,17 @@ Full tournament state — dashboard upserts everything and deletes absences.
                              // that varies by round/pool, NOT the gold bracket's total team
                              // count. null if it can't be determined yet. See goldSpotsCount
                              // note below.
-    "teams": [{
+    "teams": [{     // array order = AES's own stable pool roster order, kept stable across
+                    // snapshots — never re-sorted by rank; only each team's stats update in place
       "name": "Sky High 17 Elite",   // seed suffix stripped
       "matchesWon": 3, "matchesLost": 0,
       "setsWon": 6, "setsLost": 1,
       "pointRatio": 1.42,   // ptsFor/ptsAgainst, null if no points against
-      "finishRank": 1       // 1-indexed from standings order
+      "finishRank": 1,      // AES's real finish rank, nullable — display value only, does not drive array order
+      "exitSeed": null      // AES's real exit seed, nullable — set only once a human has confirmed
+                             // the pool's final standings in Scheduler (or, in practice, tracks
+                             // finishRank 1:1 outside of reseeded plays); dashboard uses a pool
+                             // having non-null exitSeed on every team as its "officially finalized" signal
     }]
   }],
   "brackets": [{

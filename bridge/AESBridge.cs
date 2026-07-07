@@ -408,30 +408,41 @@ class AESBridge
         try { standings = ComputeStandings(pool); }
         catch { standings = new List<Standing>(); }
 
-        // Order by AES's own computed rank (Play.TeamAssignment.FinishRank), not our
-        // own win/set-diff/point-diff tiebreakers — AES applies additional rules
-        // (Set%, PT%, head-to-head, etc.) that we don't replicate, and the dashboard
-        // flags any mismatch between its own standings and what the connector sends.
-        // Falls back to the computed order for any team AES hasn't ranked yet.
+        // Emit standings in AES's own pool.Teams roster order (the same array
+        // used below to build teamAssignments), NOT sorted by any computed or
+        // AES-ranked finish position. Sorting by finish position — whether our
+        // own win/set-diff/point-diff order, or AES's real FinishRank — makes
+        // the array reorder as the pool plays out, which makes pool-flyout rows
+        // visibly reshuffle on the dashboard (it writes `teams` straight to the
+        // UI with no re-sort of its own). pool.Teams never reorders, so we use
+        // it as the stable display order and just attach each team's current
+        // computed stats (and its real FinishRank, as a display-only field) by
+        // team-name lookup.
+        var standingByTeam = new Dictionary<string, Standing>();
+        foreach (var st in standings)
+            if (!string.IsNullOrEmpty(st.Team)) standingByTeam[st.Team] = st;
+
+        var orderedStandings = new List<Standing>();
+        var usedTeams = new HashSet<string>();
         try
         {
-            var finishRankByTeam = new Dictionary<string, int>();
             foreach (var ta in pool.Teams)
             {
-                if (!ta.FinishRank.HasValue) continue;
                 string tt;
                 try { tt = ta.TeamText; } catch { continue; }
-                if (string.IsNullOrEmpty(tt)) continue;
-                finishRankByTeam[tt] = ta.FinishRank.Value;
-            }
-            if (finishRankByTeam.Count > 0)
-            {
-                standings = standings
-                    .OrderBy(s => finishRankByTeam.TryGetValue(s.Team, out var fr) ? fr : int.MaxValue)
-                    .ToList();
+                if (string.IsNullOrEmpty(tt) || !usedTeams.Add(tt)) continue;
+                var st = standingByTeam.TryGetValue(tt, out var found) ? found : new Standing { Team = tt };
+                st.FinishRank = ta.FinishRank;
+                orderedStandings.Add(st);
             }
         }
         catch { }
+        // Any team present in computed standings but not in pool.Teams (shouldn't
+        // normally happen) is appended at the end so its stats are never dropped.
+        foreach (var st in standings)
+            if (!string.IsNullOrEmpty(st.Team) && usedTeams.Add(st.Team))
+                orderedStandings.Add(st);
+        standings = orderedStandings;
 
         var sb = new StringBuilder("{");
         sb.Append($"\"poolId\":       {pool.PlayID}, ");
@@ -460,7 +471,8 @@ class AESBridge
             sb.Append($"\"setsWon\": {st.SetsWon}, ");
             sb.Append($"\"setsLost\": {st.SetsLost}, ");
             sb.Append($"\"ptsFor\": {st.PtsFor}, ");
-            sb.Append($"\"ptsAgainst\": {st.PtsAgainst}");
+            sb.Append($"\"ptsAgainst\": {st.PtsAgainst}, ");
+            sb.Append($"\"finishRank\": {N(st.FinishRank)}");
             sb.Append("}");
         }
         sb.Append("], ");
@@ -684,6 +696,7 @@ class AESBridge
     {
         public string Team;
         public int Wins, Losses, SetsWon, SetsLost, PtsFor, PtsAgainst;
+        public int? FinishRank;
     }
 
     static List<Standing> ComputeStandings(Pool pool)
@@ -745,9 +758,10 @@ class AESBridge
 
         int G(Dictionary<string, int> d, string k) => d.TryGetValue(k, out var v) ? v : 0;
 
-        // This win/set-diff/point-diff order is only a fallback — PoolJson() re-sorts
-        // the result by AES's own Play.TeamAssignment.FinishRank when available, since
-        // AES's real tiebreak rules (Set%, PT%, H2H, etc.) aren't replicated here.
+        // This win/set-diff/point-diff order is discarded by PoolJson() — it only
+        // uses this list to look up each team's computed stats by name, then
+        // re-emits them in AES's own pool.Teams roster order (stable across
+        // snapshots), attaching AES's real FinishRank per-team as a display field.
         return teams
             .Select(t => new Standing { Team=t, Wins=G(wins,t), Losses=G(losses,t),
                                       SetsWon=G(sw,t), SetsLost=G(sl,t), PtsFor=G(pf,t), PtsAgainst=G(pa,t) })

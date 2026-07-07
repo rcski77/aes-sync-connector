@@ -172,12 +172,23 @@ Maps a pool dict; computes per-team fields not in `tournament_data.json`:
 - `courtId`: first court from `courts` array (required scalar by dashboard schema, and for pool creation)
 - `courtName`: first court name
 - `courts`: full array passed through (pools can span multiple courts)
-- `finishRank`: 1-indexed position in standings array
+- `teams` array order: passed through as-is from the bridge's `standings` array, which is
+  now (as of 2026-07) AES's own stable `pool.Teams` roster order, not a rank sort — see
+  "Standings Computation" in bridge/CLAUDE.md. The monitor does not reorder it.
+- `finishRank`: read directly from each `standings` entry's own `finishRank` field (AES's
+  real, nullable `FinishRank`) — no longer derived positionally from array index, since the
+  array itself is no longer rank-ordered
 - `pointRatio`: `ptsFor / ptsAgainst`, or `None` if ptsAgainst == 0
 - `goldSpotsCount`: looked up from `gold_spots_map` (second, optional arg — a `{poolId: count}`
   dict built once per snapshot by `_compute_gold_spots()`, see below), NOT read from the
   bridge (which always emits `null` for this field)
 - team `name`: seed suffix stripped via `_strip_seed()`
+- team `exitSeed`: joined from the bridge's `teamAssignments[]` array (already emitted per pool
+  for gold-spot computation — see `_compute_gold_spots()` below) by matching each entry's raw
+  `team` (TeamText) against `standings[].team`. `exitSeed` is null there until AES has actually
+  finalized the pool (a human confirms final standings in Scheduler) — passed through as-is,
+  never backfilled/guessed. The dashboard uses a pool having a non-null `exitSeed` on every
+  team as its signal that the pool is officially finalized, separate from "all matches played."
 
 ### `_compute_gold_spots(tournament_data)` → `{poolId: goldSpotsCount}`
 Computes, for every pool in the file, how many of its finishers are structurally still in
