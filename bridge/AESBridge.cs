@@ -343,6 +343,7 @@ class AESBridge
         string divCode = "", divName = "", poolName = "", shortName = "", fullShortName = "", date = "";
         int roundIndex = -1;
         string roundShortName = "", groupName = "", groupShortName = "";
+        int? divisionId = null;
         var courtsJson = new StringBuilder("[");
         try
         {
@@ -351,6 +352,7 @@ class AESBridge
             {
                 divCode = div.CodeAlias ?? "";
                 divName = div.DescriptionAlias ?? "";
+                divisionId = div.EventDivisionAssignmentID;
             }
             var round = pool.OwningGroup?.OwningRound;
             if (round != null)
@@ -438,8 +440,10 @@ class AESBridge
         sb.Append($"\"fullShortName\": {S(fullShortName)}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
+        sb.Append($"\"divisionId\":   {N(divisionId)}, ");
         sb.Append($"\"courts\":       {courtsJson}, ");
         sb.Append($"\"date\":         {S(date)}, ");
+        sb.Append($"\"goldSpotsCount\": null, ");
         sb.Append($"\"roundShortName\": {S(roundShortName)}, ");
         sb.Append($"\"roundIndex\":     {roundIndex}, ");
         sb.Append($"\"groupName\":      {S(groupName)}, ");

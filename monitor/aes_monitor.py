@@ -356,7 +356,154 @@ def _event_id_key(tournament_data):
     return _server_safe_key(event_id, event_info.get('manualAddition', False), event_info.get('name', ''))
 
 
-def _pool_payload(p):
+def _build_play_items(tournament_data, division_code):
+    """Flatten one division's pools + brackets into a list tagged by type, each
+    with a stable unique id (poolId/bracketId) — mirrors build_items() in
+    aes_gold_contention.py."""
+    items = []
+    for p in tournament_data.get('pools', []):
+        if p.get('divisionCode') == division_code:
+            items.append({'type': 'pool', 'id': p.get('poolId'),
+                          'roundIndex': p.get('roundIndex'),
+                          'teamAssignments': p.get('teamAssignments', [])})
+    for b in tournament_data.get('brackets', []):
+        if b.get('divisionCode') == division_code:
+            items.append({'type': 'bracket', 'id': b.get('bracketId'),
+                          'roundIndex': b.get('roundIndex'),
+                          'teamAssignments': b.get('teamAssignments', [])})
+    return items
+
+
+def _find_dest_play(items, max_round, seed, from_round):
+    """Forward search: the play in the nearest later round whose teamAssignment
+    has this seed as its entrySeed. Skips rounds that don't touch the seed."""
+    r = from_round + 1
+    while r <= max_round:
+        for it in items:
+            if it['roundIndex'] == r:
+                for ta in it['teamAssignments']:
+                    if ta.get('entrySeed') == seed:
+                        return it
+        r += 1
+    return None
+
+
+def _find_source_play(items, seed, from_round):
+    """Backward search: the play in the nearest earlier round whose
+    teamAssignment has this seed as its exitSeed. Skips rounds that don't
+    touch the seed (AES's pass-through rule)."""
+    r = from_round - 1
+    while r >= 0:
+        for it in items:
+            if it['roundIndex'] == r:
+                for ta in it['teamAssignments']:
+                    if ta.get('exitSeed') == seed:
+                        return it
+        r -= 1
+    return None
+
+
+def _find_gold_bracket_id(tournament_data, division_code):
+    """Returns the bracketId whose winner is this division's overall #1
+    finisher, or None if it can't be determined (mirrors find_gold_bracket()
+    in aes_gold_contention.py)."""
+    division = next((dv for dv in tournament_data.get('divisions', [])
+                      if dv.get('divisionCode') == division_code), None)
+    if division is None:
+        return None
+    fp1 = next((fp for fp in division.get('finalPlaces', [])
+                 if fp.get('absoluteRank') == 1), None)
+    if fp1 is None or not fp1.get('team'):
+        return None
+
+    text = fp1['team']
+    m = re.match(r'(Winner|Loser) of (\S+)', text)
+    if m:
+        match_shortname = m.group(2)
+        for b in tournament_data.get('brackets', []):
+            if b.get('divisionCode') == division_code:
+                for root in b.get('roots', []):
+                    if (root.get('match') or {}).get('shortName') == match_shortname:
+                        return b.get('bracketId')
+        return None
+
+    # Tournament already finished — team is resolved to a real name. Find the
+    # bracket whose root match's decided winner is that team.
+    for b in tournament_data.get('brackets', []):
+        if b.get('divisionCode') == division_code:
+            for root in b.get('roots', []):
+                match = root.get('match') or {}
+                if match.get('decided'):
+                    winner = match.get('team1') if match.get('firstTeamWon') else match.get('team2')
+                    if winner == text:
+                        return b.get('bracketId')
+    return None
+
+
+def _build_gold_ancestors(items, gold_item):
+    """Backward BFS from Gold: a play is a gold ancestor if at least one of
+    its teamAssignments' entrySeed traces back to it from a later ancestor."""
+    ids_seen = {gold_item['id']}
+    frontier = [gold_item]
+    while frontier:
+        nxt = []
+        for play in frontier:
+            for ta in play['teamAssignments']:
+                seed = ta.get('entrySeed')
+                if seed is None:
+                    continue
+                src = _find_source_play(items, seed, play['roundIndex'])
+                if src and src['id'] not in ids_seen:
+                    ids_seen.add(src['id'])
+                    nxt.append(src)
+        frontier = nxt
+    return ids_seen
+
+
+def _compute_gold_spots(tournament_data):
+    """Returns {poolId: goldSpotsCount} — for each pool, how many of its
+    finishers are structurally still in contention for the division's gold
+    bracket (their next-round destination play is an ancestor of Gold).
+    Ported from the validated aes_gold_contention.py diagnostic — see
+    gold_contention_model.md in project memory. NOT a per-division constant:
+    a 4-team pool can have 0-4 teams still in contention depending on round
+    and how AES's own bracket structure was built."""
+    result = {}
+    for div in tournament_data.get('divisions', []):
+        code = div.get('divisionCode')
+        items = _build_play_items(tournament_data, code)
+        if not items:
+            continue
+        round_indexes = [it['roundIndex'] for it in items if it['roundIndex'] is not None]
+        if not round_indexes:
+            continue
+        max_round = max(round_indexes)
+
+        gold_id = _find_gold_bracket_id(tournament_data, code)
+        if gold_id is None:
+            continue
+        gold_item = next((it for it in items if it['type'] == 'bracket' and it['id'] == gold_id), None)
+        if gold_item is None:
+            continue
+
+        gold_ancestors = _build_gold_ancestors(items, gold_item)
+
+        for it in items:
+            if it['type'] != 'pool':
+                continue
+            in_contention = 0
+            for ta in it['teamAssignments']:
+                exit_seed = ta.get('exitSeed')
+                if exit_seed is None:
+                    continue
+                dest = _find_dest_play(items, max_round, exit_seed, it['roundIndex'])
+                if dest and dest['id'] in gold_ancestors:
+                    in_contention += 1
+            result[it['id']] = in_contention
+    return result
+
+
+def _pool_payload(p, gold_spots_map=None):
     """Map a tournament_data.json pool dict to the ingest API pool shape."""
     standings = p.get('standings', [])
     teams = []
@@ -378,13 +525,14 @@ def _pool_payload(p):
     return {
         'playId':          p.get('poolId'),
         'division':        p.get('divisionName', ''),
+        'divisionId':      p.get('divisionId'),
         'name':            p.get('name', ''),
         'shortName':       p.get('fullShortName') or p.get('shortName', ''),
         'courtId':         first_court.get('courtId'),
         'courtName':       first_court.get('name', ''),
         'courts':          courts,
         'date':            p.get('date', ''),
-        'goldSpotsCount':  None,
+        'goldSpotsCount':  (gold_spots_map or {}).get(p.get('poolId')),
         'teams':           teams,
     }
 
@@ -500,12 +648,13 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
     event_id = str(tournament_data['event']['eventId'])
     brackets = [bp for b in tournament_data.get('brackets', [])
                 if (bp := _bracket_payload(b)) is not None]
+    gold_spots_map = _compute_gold_spots(tournament_data)
     payload = {
         'aesEventId':    event_id,
         'aesEventIdKey': _event_id_key(tournament_data),
         'snapshotTime':  datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
-        'pools':         [_pool_payload(p) for p in tournament_data.get('pools', [])],
+        'pools':         [_pool_payload(p, gold_spots_map) for p in tournament_data.get('pools', [])],
         'brackets':      brackets,
     }
     url = base_url.rstrip('/') + '/snapshot'

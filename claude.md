@@ -243,8 +243,14 @@ the monitor transforms it into the ingest API payload shape before POSTing.
     "poolId", "name", "shortName", "fullShortName", "divisionCode", "divisionName",
     // fullShortName is Pool.CompleteShortName, e.g. "R2G1P5" (Round+Group+Pool) — the
     // dashboard is sent this in place of shortName (see ingest schema below)
+    "divisionId",   // Division.EventDivisionAssignmentID (public, no reflection) — AES's
+                     // real numeric division ID, the same one the dashboard's own direct
+                     // AES fetch reads as Divisions[].DivisionId
     "courts": [{ "courtId", "name" }],  // from Pool.Courts (reflection); fallback = first match court
     "date",         // "YYYY-MM-DD" from first scheduled match (UTC)
+    "goldSpotsCount", // AESBridge always emits null here — the real value is computed
+                      // downstream by the monitor (_compute_gold_spots()), not the bridge;
+                      // see goldSpotsCount note below
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
   }],
   "brackets": [{
@@ -319,14 +325,21 @@ Full tournament state — dashboard upserts everything and deletes absences.
   "pools": [{
     "playId": 11111,
     "division": "17 Open",
+    "divisionId": 213772,    // Division.EventDivisionAssignmentID — required for the dashboard
+                             // to create a brand-new Pool row (missing => creation skipped,
+                             // existing rows still update fine)
     "name": "Pool 1",        // FullName from assembly, e.g. "Pool 1"
     "shortName": "R2G1P5",   // Pool.CompleteShortName (Round+Group+Pool), not the bare "P1" —
                              // monitor sends fullShortName here in preference to plain shortName
-    "courtId": -64759,       // first court ID (required by dashboard schema)
+    "courtId": -64759,       // first court ID (required by dashboard schema AND for pool creation)
     "courtName": "North 14", // first court name
     "courts": [{ "courtId": -64759, "name": "North 14" }],  // full array (pools can span multiple courts)
     "date": "2025-06-28",
-    "goldSpotsCount": null,
+    "goldSpotsCount": 2,     // how many of THIS POOL's finishers are still structurally in
+                             // contention for the division's gold bracket — a per-pool count
+                             // that varies by round/pool, NOT the gold bracket's total team
+                             // count. null if it can't be determined yet. See goldSpotsCount
+                             // note below.
     "teams": [{
       "name": "Sky High 17 Elite",   // seed suffix stripped
       "matchesWon": 3, "matchesLost": 0,
@@ -401,14 +414,24 @@ Auth: Authorization: Bearer <INGEST_API_KEY>
 ---
 
 ## Outstanding Issues
-1. **goldSpotsCount always null** — the number of teams advancing from each pool to gold
-   bracket is not yet extracted from the AES assembly. `Pool.PlayoffBracket.TeamCount` was
-   investigated and ruled out — that's the pool's own internal tiebreaker bracket (used to
-   resolve 2-3 way ties via head-to-head mini-bracket play, matches flagged
-   `Match.IsFromPlayoffBracket`), not a gold-bracket-advancement count. The real mechanism is
-   still unknown; likely involves cross-referencing `Division.FinalPlace` group names
-   (Gold/Silver/Bronze) against manual team seeding into a separate bracket, with no simple
-   discrete "spots count" field found so far.
+1. ~~**goldSpotsCount always null**~~ — **Resolved.** `goldSpotsCount` is a **per-pool**
+   value: how many of that specific pool's finishers are structurally still in contention
+   for the division's gold bracket — NOT a division-wide constant (a first attempt wrongly
+   computed "total teams in the division's gold bracket" and applied that same number to
+   every pool in the division, which is meaningless for a 4-team pool). The validated model
+   (see `gold_contention_model.md` in project memory, confirmed against Adam's real data
+   2026-07-05, and `monitor/aes_gold_contention.py`, the diagnostic script that established
+   it): find the division's Gold bracket via `divisions[].finalPlaces` (the `absoluteRank==1`
+   entry's logic name / decided winner), backward-BFS from Gold across rounds via
+   entrySeed→exitSeed matching to build the full set of "gold ancestor" plays, then for each
+   pool, forward-trace each finisher's exitSeed to its actual next-round destination play and
+   count how many land in that ancestor set. Round-dependent (e.g. Round 1 might keep 3-of-4
+   per pool, Round 2 cuts to 2-of-4) — not a fixed ratio. Implemented in
+   `monitor/aes_monitor.py`'s `_compute_gold_spots()` (ported from `aes_gold_contention.py`),
+   computed once per snapshot from `divisions[]`/`pools[]`/`brackets[]` already in
+   `tournament_data.json` — no bridge changes needed beyond `roundIndex`/`groupShortName`/
+   `teamAssignments`, which already existed. `AESBridge.cs` itself still always emits
+   `goldSpotsCount: null` for this field; the monitor overwrites it in `_pool_payload()`.
 
 2. ~~**aesEventId mismatch**~~ — **Resolved.** The connector now also sends `aesEventIdKey`,
    the AES web API string ID (e.g. `PTAwMDAwNDUwMjk90`), derived from the numeric `eventId` via

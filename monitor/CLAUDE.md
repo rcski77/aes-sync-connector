@@ -167,13 +167,46 @@ and snapshot payloads, alongside the existing numeric `aesEventId`.
 Maps a pool dict; computes per-team fields not in `tournament_data.json`:
 - `shortName`: sends `fullShortName` (Pool.CompleteShortName, e.g. `"R2G1P5"`) in preference
   to the bare `shortName` (e.g. `"P5"`) — the dashboard displays round/group context
-- `courtId`: first court from `courts` array (required scalar by dashboard schema)
+- `divisionId`: passed through from bridge output (`Division.EventDivisionAssignmentID`) —
+  required, alongside `courtId`, for the dashboard to create a brand-new Pool row
+- `courtId`: first court from `courts` array (required scalar by dashboard schema, and for pool creation)
 - `courtName`: first court name
 - `courts`: full array passed through (pools can span multiple courts)
 - `finishRank`: 1-indexed position in standings array
 - `pointRatio`: `ptsFor / ptsAgainst`, or `None` if ptsAgainst == 0
-- `goldSpotsCount`: always `None` (not yet available from AES assembly)
+- `goldSpotsCount`: looked up from `gold_spots_map` (second, optional arg — a `{poolId: count}`
+  dict built once per snapshot by `_compute_gold_spots()`, see below), NOT read from the
+  bridge (which always emits `null` for this field)
 - team `name`: seed suffix stripped via `_strip_seed()`
+
+### `_compute_gold_spots(tournament_data)` → `{poolId: goldSpotsCount}`
+Computes, for every pool in the file, how many of its finishers are structurally still in
+contention for their division's gold bracket — ported from the validated diagnostic script
+`aes_gold_contention.py` (see `gold_contention_model.md` in project memory, confirmed correct
+against Adam's real data 2026-07-05). This is a **per-pool** count, not a division-wide
+constant — a 4-team pool's count varies by round (e.g. Round 1 might keep 3-of-4, Round 2
+cuts to 2-of-4), and a first implementation attempt wrongly applied a single division-wide
+"total gold bracket size" number to every pool in that division, which Adam caught immediately
+(a 4-team pool showing `goldSpotsCount: 16` makes no sense).
+
+Model, per division:
+1. Find the Gold bracket via `divisions[].finalPlaces`' `absoluteRank == 1` entry — its logic
+   name (`"Winner of R4GoldM15"`) or, once decided, its resolved winner team name — identifies
+   which bracket root match produces the division's #1 finisher (`_find_gold_bracket_id()`).
+2. Backward BFS from that bracket (`_build_gold_ancestors()`): for every entrySeed of every
+   play in the frontier, find the play in the nearest earlier round whose teamAssignment
+   produced that value as an `exitSeed` (`_find_source_play()`, skipping rounds that don't
+   touch the seed — AES's own pass-through behavior). Every play reached this way is a "gold
+   ancestor."
+3. For each pool, each finisher's actual next-round destination (`_find_dest_play()`, forward
+   search by `entrySeed == exitSeed`) is checked against the gold-ancestor set
+   (`_compute_gold_spots()`); the count of finishers landing in that set is the pool's
+   `goldSpotsCount`.
+
+Uses `roundIndex`, `groupShortName` (not currently used but kept from the diagnostic script
+for parity), and `teamAssignments` (`entrySeed`/`exitSeed`/`finishRank`) already emitted by
+`PoolJson()`/`BracketJson()` in the bridge — no bridge changes were needed. Called once per
+snapshot in `push_snapshot()`, passed into every `_pool_payload()` call as `gold_spots_map`.
 
 ### `_bracket_payload(b)` / `_bracket_node_payload(node)` → ingest brackets[] shape
 Maps a `tournament_data.json` bracket dict (already walked via `Bracket.PlotMatchPositions()`
@@ -228,6 +261,7 @@ On each new connection:
 ---
 
 ## Outstanding / Known Gaps
-- **goldSpotsCount** always `None` — see bridge/CLAUDE.md for investigation notes.
+- ~~**goldSpotsCount**~~ — **Resolved.** Computed per-pool by `_compute_gold_spots()`, ported
+  from `monitor/aes_gold_contention.py` — see that function's note above.
 - ~~**aesEventId**~~ — **Resolved.** The connector now also sends `aesEventIdKey` (the derived
   AES web API string ID) alongside the numeric `aesEventId` — see `_server_safe_key()` above.

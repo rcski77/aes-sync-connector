@@ -101,7 +101,7 @@ result even though it's fully present and decided in the data.
 | `CompleteShortName` | e.g. "R1P1" — fallback if FullName/ShortName unavailable |
 | `Courts` | Court[] — accessed via reflection; each court has `CourtID` (int) and `Name` (string) |
 | `Matches` | Match[] — iterate to compute standings and find date |
-| `OwningGroup?.OwningRound?.OwningDivision` | Chain to get division |
+| `OwningGroup?.OwningRound?.OwningDivision` | Chain to get division; `Division.EventDivisionAssignmentID` (public, no reflection) is the numeric `divisionId` sent in `pools[]` |
 
 ## Known Bracket Properties (AES.Scheduler.Model.Bracket)
 
@@ -158,8 +158,10 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "shortName",     // Pool.ShortName (reflection), e.g. "P1"; fallback: CompleteShortName
     "fullShortName", // Pool.CompleteShortName always, e.g. "R2G1P5" (Round+Group+Pool) — dashboard prefers this
     "divisionCode", "divisionName",
+    "divisionId",  // Division.EventDivisionAssignmentID, int|null
     "courts": [{ "courtId", "name" }],  // Pool.Courts (reflection); fallback: single entry from first match
     "date",        // "YYYY-MM-DD" UTC, from first scheduled match
+    "goldSpotsCount", // always null here — bridge doesn't compute this, see goldSpotsCount note below
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst" }]
   }],
   "brackets": [{
@@ -216,11 +218,14 @@ place that needed to change; the monitor requires no updates.
 ---
 
 ## Outstanding / Known Gaps
-- `goldSpotsCount` — number of teams advancing to gold bracket — not yet found in assembly.
-  `Pool.PlayoffBracket.TeamCount` was investigated and ruled out (it's the pool's own
-  tiebreaker bracket, see `IsFromPlayoffBracket` above, not gold-bracket advancement).
-  Still needs investigation — likely involves `Division.FinalPlace` group names
-  (Gold/Silver/Bronze) cross-referenced against manual team seeding into a separate bracket.
+- `goldSpotsCount` — the bridge always emits `null` for this field; it is NOT computed here.
+  It's a per-pool value (how many of that pool's finishers are still structurally in
+  contention for the division's gold bracket), computed downstream by the monitor's
+  `_compute_gold_spots()` using `roundIndex`/`groupShortName`/`teamAssignments` (already
+  emitted by `PoolJson()`/`BracketJson()`) plus `divisions[].finalPlaces` and
+  `brackets[].roots`. See monitor/CLAUDE.md and `gold_contention_model.md` in project memory
+  for the model — a first attempt here wrongly computed a division-wide bracket-size
+  constant instead of a per-pool contention count; don't repeat that mistake.
 - Pool standings `team` names include seed suffix (e.g. "(GL)") — stripped by `_strip_seed()` in monitor.
 - `workTeam` is an empty string when not assigned; monitor coerces to null.
 - The AES web API event ID string (e.g. `PTAwMDAwNDUwMjk90`) is not stored in the SchedulerFile
