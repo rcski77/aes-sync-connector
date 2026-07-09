@@ -218,6 +218,21 @@ field. That field is a display value only; it does not drive array order.
 The monitor's `_pool_payload()` reads `finishRank` straight from each `standings` entry
 (no longer derived positionally from array index).
 
+**Bug fix (2026-07-08) — placeholder team leaking into standings for pools with a 2-set
+playoff/tiebreaker:** `ComputeStandings()` used to register roster candidates (`Reg()`) from
+`allMatches` (round-robin + `Pool.PlayoffBracket` matches together) before filtering
+`IsFromPlayoffBracket` matches out of the win/loss computation. When AES has scheduled a
+pool's tiebreaker but its first match isn't decided yet, the second tiebreaker match's
+`FirstTeamText`/`SecondTeamText` is a placeholder like `"Winner of Match 1"` — that text got
+registered into `teams`, and since it's absent from `pool.Teams` (the real roster), `PoolJson()`'s
+"team present in standings but not in `pool.Teams`" fallback (meant to catch genuinely
+unexpected cases) re-appended it as a bogus all-zero standings row. Fixed by registering roster
+candidates from `regularMatches` (post-`IsFromPlayoffBracket`-filter) instead of `allMatches` —
+see `docs/ingest-api.md` in aes-tourney-director for the server-side description of this same
+placeholder-row quirk (that doc's guidance was to build `teams` from the roster and drop
+placeholder entries; this fix makes the bridge's own "roster" computation actually exclude them
+at the source instead of relying on the dashboard's name-pattern backstop filter).
+
 ---
 
 ## Outstanding / Known Gaps

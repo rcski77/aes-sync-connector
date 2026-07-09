@@ -725,8 +725,6 @@ class AESBridge
             .Where(m => !string.IsNullOrEmpty(m.FirstTeamText) && !string.IsNullOrEmpty(m.SecondTeamText))
             .ToArray();
 
-        foreach (var m in allMatches) { Reg(m.FirstTeamText); Reg(m.SecondTeamText); }
-
         // Pool.Matches concatenates the pool's own round-robin matches with any
         // matches from its internal tiebreaker bracket (Pool.PlayoffBracket) —
         // used to resolve 2-3 way ties via head-to-head mini-bracket play, not
@@ -734,7 +732,15 @@ class AESBridge
         // tiebreaker matches must NOT count toward standings. IsFromPlayoffBracket
         // identifies them exactly (same filter AES's own Play.TeamStats and
         // Division.TeamStats use internally), instead of inferring by count.
-        var regularMatches = allMatches.Where(m => !m.IsFromPlayoffBracket);
+        var regularMatches = allMatches.Where(m => !m.IsFromPlayoffBracket).ToArray();
+
+        // Register roster candidates from regular matches only. A playoff/tiebreaker
+        // match whose source isn't decided yet has a placeholder FirstTeamText/
+        // SecondTeamText like "Winner of Match 1" — registering that (via allMatches)
+        // used to leak into `teams`/`standings`, and since it's not a name in
+        // pool.Teams either, PoolJson()'s "team present in standings but not in
+        // pool.Teams" fallback re-appended it as a bogus all-zero standings row.
+        foreach (var m in regularMatches) { Reg(m.FirstTeamText); Reg(m.SecondTeamText); }
 
         foreach (var m in regularMatches)
         {
