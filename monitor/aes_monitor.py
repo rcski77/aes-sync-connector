@@ -678,6 +678,11 @@ def _pool_payload(p, gold_spots_map=None):
         'courts':          courts,
         'date':            p.get('date', ''),
         'goldSpotsCount':  (gold_spots_map or {}).get(p.get('poolId')),
+        'matchFormat':     p.get('matchFormat', ''),
+        'typeOfMatches':   p.get('typeOfMatches'),
+        'setCount':        p.get('setCount'),
+        'pointsToWinNormalSet':   p.get('pointsToWinNormalSet'),
+        'pointsToWinDecidingSet': p.get('pointsToWinDecidingSet'),
         'teams':           teams,
     }
 
@@ -782,6 +787,11 @@ def _bracket_payload(b):
         'date':             (root.get('scheduledStartTime') or '').split('T')[0],
         'bracketFullName':  b.get('fullName') or b.get('name', ''),
         'bracketShortName': b.get('shortName') or b.get('name', ''),
+        'matchFormat':      b.get('matchFormat', ''),
+        'typeOfMatches':    b.get('typeOfMatches'),
+        'setCount':         b.get('setCount'),
+        'pointsToWinNormalSet':   b.get('pointsToWinNormalSet'),
+        'pointsToWinDecidingSet': b.get('pointsToWinDecidingSet'),
         'root':             root,
     }
 
