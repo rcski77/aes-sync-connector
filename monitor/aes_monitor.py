@@ -786,7 +786,7 @@ def _bracket_payload(b):
     }
 
 
-def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None):
+def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None, allow_writeback=False):
     """POST full tournament state to /api/ingest/snapshot."""
     if not base_url or not tournament_data:
         return
@@ -797,6 +797,7 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
     payload = {
         'aesEventId':    event_id,
         'aesEventIdKey': _event_id_key(tournament_data),
+        'writebackEnabled': allow_writeback,
         'snapshotTime':  datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
         'pools':         [_pool_payload(p, gold_spots_map) for p in tournament_data.get('pools', [])],
@@ -975,7 +976,7 @@ def monitor(cfg):
                     if curr and base_url:
                         now = datetime.datetime.now(datetime.timezone.utc)
                         if last_snapshot is None or (now - last_snapshot).total_seconds() >= SNAPSHOT_INTERVAL:
-                            push_snapshot(curr, base_url, ingest_key, timeout, cf_headers)
+                            push_snapshot(curr, base_url, ingest_key, timeout, cf_headers, allow_writeback)
                             last_snapshot = now
 
                     if curr is not None:
