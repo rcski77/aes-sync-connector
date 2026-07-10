@@ -537,6 +537,11 @@ class AESBridge
         sb.Append($"\"roundIndex\":     {roundIndex}, ");
         sb.Append($"\"groupName\":      {S(groupName)}, ");
         sb.Append($"\"groupShortName\": {S(groupShortName)}, ");
+        sb.Append($"\"matchFormat\":    {S(pool.MatchDescription)}, ");
+        sb.Append($"\"typeOfMatches\":  {S(pool.TypeOfMatches.ToString())}, ");
+        sb.Append($"\"setCount\":       {pool.SetCount}, ");
+        sb.Append($"\"pointsToWinNormalSet\":   {pool.PointsToWinNormalSet}, ");
+        sb.Append($"\"pointsToWinDecidingSet\": {pool.PointsToWinDecidingSet}, ");
         sb.Append("\"standings\": [");
         for (int i = 0; i < standings.Count; i++)
         {
@@ -647,6 +652,11 @@ class AESBridge
         sb.Append($"\"roundIndex\":     {roundIndex}, ");
         sb.Append($"\"groupName\":      {S(groupName)}, ");
         sb.Append($"\"groupShortName\": {S(groupShortName)}, ");
+        sb.Append($"\"matchFormat\":    {S(bracket.MatchDescription)}, ");
+        sb.Append($"\"typeOfMatches\":  {S(bracket.TypeOfMatches.ToString())}, ");
+        sb.Append($"\"setCount\":       {bracket.SetCount}, ");
+        sb.Append($"\"pointsToWinNormalSet\":   {bracket.PointsToWinNormalSet}, ");
+        sb.Append($"\"pointsToWinDecidingSet\": {bracket.PointsToWinDecidingSet}, ");
         sb.Append($"\"matchCount\":   {bracket.Matches.Length}, ");
         sb.Append($"\"decided\":      {bracket.Matches.Count(m => m.TypeOfOutcome != Match.OutcomeType.Undecided)}, ");
         sb.Append($"\"roots\": {rootsJson}, ");

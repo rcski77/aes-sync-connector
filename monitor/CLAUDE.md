@@ -252,6 +252,9 @@ Maps a pool dict; computes per-team fields not in `tournament_data.json`:
 - `goldSpotsCount`: looked up from `gold_spots_map` (second, optional arg — a `{poolId: count}`
   dict built once per snapshot by `_compute_gold_spots()`, see below), NOT read from the
   bridge (which always emits `null` for this field)
+- `matchFormat`/`typeOfMatches`/`setCount`/`pointsToWinNormalSet`/`pointsToWinDecidingSet`:
+  passed through as-is from the bridge (`Play.MatchDescription` etc., see bridge/CLAUDE.md's
+  "Known Play Properties") — one format per pool, not sent per-match
 - team `name`: seed suffix stripped via `_strip_seed()`
 - team `exitSeed`: joined from the bridge's `teamAssignments[]` array (already emitted per pool
   for gold-spot computation — see `_compute_gold_spots()` below) by matching each entry's raw
@@ -323,6 +326,8 @@ in the bridge) to the dashboard's `docs/bracket-ingest-spec.md` shape:
   `fullShortName` field for the round-prefixed `CompleteShortName` value.
 - `date`: Eastern date (via `_eastern_naive`, date portion only) of the **root** (final) match's
   `startTime` — not the earliest match in the tree
+- `matchFormat`/`typeOfMatches`/`setCount`/`pointsToWinNormalSet`/`pointsToWinDecidingSet`:
+  same shape/meaning as `_pool_payload()`'s, passed through as-is from the bridge
 - `root`: recursively built via `_bracket_node_payload()`, which walks `topSource`/`bottomSource`
   all the way to leaf (first-round) matches, not just final + semis
 - `secondTeamWon`: not a field the bridge emits for bracket match nodes — derived here as

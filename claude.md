@@ -248,6 +248,14 @@ the monitor transforms it into the ingest API payload shape before POSTing.
                      // AES fetch reads as Divisions[].DivisionId
     "courts": [{ "courtId", "name" }],  // from Pool.Courts (reflection); fallback = first match court
     "date",         // "YYYY-MM-DD" from first scheduled match (UTC)
+    "matchFormat",  // Play.MatchDescription verbatim, e.g. "2 of 3 to 25(15)" or "3 Sets to 25" —
+                     // configured per-Pool/Bracket, not per-Division or per-Match, so every match
+                     // inside one pool/bracket shares the same format
+    "typeOfMatches", // "BestOf" | "NumberOfSets" (Play.MatchType)
+    "setCount",      // int — total set slots (odd if BestOf; Play forces this)
+    "pointsToWinNormalSet", "pointsToWinDecidingSet",  // int — e.g. 25/15; equal if no
+                     // deciding-set difference is configured (NumberOfSets plays usually have
+                     // both equal, but not enforced)
     "goldSpotsCount", // AESBridge always emits null here — the real value is computed
                       // downstream by the monitor (_compute_gold_spots()), not the bridge;
                       // see goldSpotsCount note below
@@ -260,6 +268,8 @@ the monitor transforms it into the ingest API payload shape before POSTing.
   "brackets": [{
     "bracketId", "name", "shortName", "fullName",
     "divisionCode", "divisionName", "isPlayoff", "notes",
+    "matchFormat", "typeOfMatches", "setCount",
+    "pointsToWinNormalSet", "pointsToWinDecidingSet",  // same shape/meaning as pools[] above
     "matchCount", "decided",
     "roots": [{
       "x", "y",           // float — layout coordinates from PlotMatchPositions()
@@ -352,6 +362,13 @@ Full tournament state — dashboard upserts everything and deletes absences.
                              // that varies by round/pool, NOT the gold bracket's total team
                              // count. null if it can't be determined yet. See goldSpotsCount
                              // note below.
+    "matchFormat": "2 of 3 to 25(15)",  // Play.MatchDescription verbatim — human-readable,
+                             // built from the four raw fields below. Configured per-pool, so
+                             // every match in this pool shares it (not sent per-match — see
+                             // matches[] above, which does not carry format fields).
+    "typeOfMatches": "BestOf",          // "BestOf" | "NumberOfSets"
+    "setCount": 3,
+    "pointsToWinNormalSet": 25, "pointsToWinDecidingSet": 15,
     "teams": [{     // array order = AES's own stable pool roster order, kept stable across
                     // snapshots — never re-sorted by rank; only each team's stats update in place
       "name": "Sky High 17 Elite",   // seed suffix stripped
@@ -371,6 +388,8 @@ Full tournament state — dashboard upserts everything and deletes absences.
     "bracketFullName": "Round 4 Championship Division",  // Bracket.CompleteFullName, unmodified
     "bracketShortName": "Gold",      // Bracket.ShortName (bare — fallback: CompleteShortName
                                       // e.g. "R4Gold" — if AES never populated ShortName)
+    "matchFormat": "2 of 3 to 25(15)", "typeOfMatches": "BestOf", "setCount": 3,
+    "pointsToWinNormalSet": 25, "pointsToWinDecidingSet": 15,  // same shape/meaning as pools above
     "root": {
       "matchId": -52833, "matchName": "Round 4 Championship Division Match 15",
       "firstTeam": "Winner of Match 13", "secondTeam": "Winner of Match 14",

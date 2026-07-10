@@ -138,6 +138,24 @@ so downstream consumers that group matches by `playId == pool.poolId` (e.g. a
 dashboard's "match results" list for a pool) would silently drop the tiebreaker
 result even though it's fully present and decided in the data.
 
+## Known Play Properties (AES.Scheduler.Model.Play — shared base of Pool and Bracket)
+
+Match-format config lives here, not on `Division` or `Match` — one format per
+pool/bracket, shared by every match inside it (`Play.SetCount`'s setter pushes
+the value down to `match.SetCount` for every `Match` in the play). All public,
+no reflection needed:
+
+| Property | Notes |
+|---|---|
+| `TypeOfMatches` | `Play.MatchType` enum: `BestOf` or `NumberOfSets` |
+| `SetCount` | int — total set slots. Forced odd when `TypeOfMatches == BestOf` |
+| `PointsToWinNormalSet` | int, e.g. `25` |
+| `PointsToWinDecidingSet` | int, e.g. `15` — same as `PointsToWinNormalSet` if no deciding-set difference is configured |
+| `MatchDescription` | string, AES's own formatted summary — `"2 of 3 to 25(15)"` (BestOf) or `"3 Sets to 25"` (NumberOfSets); reused verbatim as `matchFormat` |
+
+Emitted on `pools[]`/`brackets[]` (one per play), not on `matches[]` — see
+schema below.
+
 ## Known Pool Properties (AES.Scheduler.Model.Pool)
 
 | Property | Notes |
@@ -212,6 +230,8 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "courts": [{ "courtId", "name" }],  // Pool.Courts (reflection); fallback: single entry from first match
     "date",        // "YYYY-MM-DD" UTC, from first scheduled match
     "goldSpotsCount", // always null here — bridge doesn't compute this, see goldSpotsCount note below
+    "matchFormat", "typeOfMatches", "setCount",
+    "pointsToWinNormalSet", "pointsToWinDecidingSet",  // see "Known Play Properties" above
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst", "finishRank" }]
   }],
   "brackets": [{
@@ -221,6 +241,8 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "fullName",      // Bracket.CompleteFullName always, e.g. "Round 4 Championship Division"
     "fullShortName", // Bracket.CompleteShortName always, e.g. "R4Gold" (Round+bracket short name)
     "divisionCode", "divisionName", "isPlayoff", "notes",
+    "matchFormat", "typeOfMatches", "setCount",
+    "pointsToWinNormalSet", "pointsToWinDecidingSet",  // same shape/meaning as pools[] above
     "matchCount", "decided",
     "roots": [{
       "x", "y", "reversed", "doubleCapped",
