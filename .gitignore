@@ -9,3 +9,4 @@ obj/
 scheduler_file.bin
 tournament_data.json
 remote_entry.bin
+remote_entry_out.bin

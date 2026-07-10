@@ -32,6 +32,7 @@ then falls back to the parent directory (project root).
 host       = 127.0.0.1
 port       = 17471
 password   = ${AES_PASSWORD}
+allow_writeback = false   # opt-in: let the dashboard send score corrections into AES
 
 [bridge]
 exe = ..\bridge\bin\Release\net48\AESBridge.exe   # relative to monitor/
@@ -40,6 +41,7 @@ exe = ..\bridge\bin\Release\net48\AESBridge.exe   # relative to monitor/
 endpoint   = ${DASHBOARD_ENDPOINT}   # base URL, e.g. https://host/api/ingest
 ingest_key = ${INGEST_API_KEY}
 timeout    = 10
+outbox_poll_interval = 5   # seconds between outbox polls, only used if allow_writeback=true
 ```
 
 **.env** (project root):
@@ -63,9 +65,13 @@ Short version: RSA key exchange → XOR stream cipher → password auth → data
 |---|---|
 | `CS` | Cipher state — holds key, IV, position |
 | `xor(data, state)` | Applies the custom stream cipher in-place, advances state |
-| `client_init(sock, password)` | Full handshake — returns an encrypted `Chan` for reading |
-| `Chan` | Wrapper over socket + cipher state; `.rcmd()`, `.rint()`, `.rdata()` |
+| `client_init(sock, password)` | Full handshake — returns `(cin, cout)`, encrypted `Chan`s for reading and writing |
+| `Chan` | Wrapper over socket + cipher state; `.rcmd()`, `.rint()`, `.rdata()` for reading, `.wcmd()`, `.wdata()`, `.send(nc, cc, data)` for writing |
 | `recv_n(sock, n)` | Blocking read of exactly n bytes |
+
+`cout` (the outbound channel) is kept alive for the connection's whole
+lifetime, not just the handshake — it's what write-back (below) sends over.
+Only the main loop thread ever calls `cout.send()`; see "Write-Back (Outbox)".
 
 **Message loop:** After handshake, each message is:
 ```
@@ -101,7 +107,67 @@ decode_remote_entry(raw_bytes, bridge_exe)
 Runtime artifacts written to the monitor/ directory:
 - `scheduler_file.bin` — last SchedulerFile binary received
 - `remote_entry.bin` — last RemoteEntryUpdate binary received
+- `remote_entry_out.bin` — last write-back payload built for sending (see below)
 - `tournament_data.json` — last parsed tournament state
+
+---
+
+## Write-Back (Outbox)
+
+Opt-in (`allow_writeback = true`). Lets the dashboard push score corrections
+into AES over the same connection. Full endpoint contract (`GET .../outbox`,
+`POST .../outbox/{id}/ack`) is in the root CLAUDE.md's "Dashboard Outbox API"
+section — this is the connector-side implementation of that contract.
+
+```python
+poll_outbox(base_url, ingest_key, timeout, poll_interval, out_q, stop_event)
+# Background daemon thread, one per AES connection. GETs {base_url}/outbox,
+# pushes each returned command onto out_q. Only touches the dashboard HTTP
+# connection — never the AES socket. Stopped via stop_event when the
+# connection drops, so reconnects don't accumulate duplicate pollers.
+```
+
+The main loop drains `out_q` in the existing `except socket.timeout: continue`
+branch (fires ≥1/sec even when AES is idle) and does the actual send there —
+this keeps `cout`/the cipher state single-thread-owned, so no lock is needed.
+
+```python
+_merge_for_encode(cmd, tournament_data, file_id)
+# Builds the --encode-remote CLI args for one outbox command. `sets` comes
+# from the command if present, else falls back to tournament_data's cached
+# sets for that match (outcome-only correction). workTeamNumber/typeOfWorkTeam
+# ALWAYS come from tournament_data, never the command — AES's apply logic
+# overwrites both unconditionally, so this is what prevents a score-only
+# correction from silently clearing an assigned work team.
+```
+
+```python
+send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe)
+# Calls AESBridge.exe --encode-remote, reads the resulting payload, sends it
+# via cout.send(NCC_OBJECT, CMD_REMOTE_ENTRY_UPDATE, payload).
+# Returns (status, detail):
+#   'applied'  — sent, no local error (does not confirm AES's UI updated —
+#                see root CLAUDE.md, AES never echoes writes back to sender)
+#   'rejected' — bridge validation failed (malformed input) — don't retry as-is
+#   'failed'   — transient (AES not connected, fileId not yet known, subprocess
+#                timeout) — safe to retry
+```
+
+```python
+_ack_outbox(base_url, ingest_key, timeout, cmd_id, status, detail)
+# POSTs the result to {base_url}/outbox/{id}/ack. Reuses _post(), runs in a
+# daemon thread like the delta/snapshot pushes.
+```
+
+`current_file_id` (the tournament's `SchedulerFile.FileID`, required as
+payload slot `[0]`) is captured from `tournament_data.json`'s `event.fileId`
+on every `CMD_EVENT_UPDATE` decode — write-back is a no-op (`'failed'`, safe
+to retry) until the first snapshot has been decoded after connecting.
+
+`OUTCOME_CODES` (reverse of `OUTCOMES`) and `WORK_TEAM_TYPE_CODE` (name → int,
+mirroring `Match.WorkTeamType`'s enum order) are the lookup tables
+`_merge_for_encode` uses to turn the bridge's string fields back into the
+integer codes AES's wire format expects.
 
 ---
 

@@ -4,7 +4,10 @@
 Loads an AES Scheduler binary payload (SchedulerFile format) by invoking the
 `AES.Scheduler.Model` assembly from EventScheduler_Release.exe, then serializes
 the tournament data to `tournament_data.json`. Also decodes `RemoteEntryUpdate`
-BinaryFormatter payloads via `--remote` flag.
+BinaryFormatter payloads via `--remote` flag, and encodes a score correction
+into that same wire format via `--encode-remote` (the write-back direction —
+see "Encoding (--encode-remote)" below and root CLAUDE.md's "Dashboard Outbox
+API").
 
 ## Build
 ```bash
@@ -19,8 +22,13 @@ Always build after editing AESBridge.cs to catch C# string escaping bugs early.
 ```
 AESBridge.exe <path-to-binary>           # parse SchedulerFile → tournament_data.json
 AESBridge.exe <path-to-binary> --remote  # decode RemoteEntryUpdate String[] payload
+AESBridge.exe --encode-remote <outFile> <fileIdGuid> <matchId> <outcome> <workTeamNumber> <typeOfWorkTeam> [<t1> <t2> ...]
+                                          # encode a score correction (write-back direction)
 ```
 Output JSON is written next to the input file (or next to AESBridge.exe if piped).
+`--encode-remote` writes raw BinaryFormatter bytes to `<outFile>` instead (binary,
+not JSON — the caller sends it straight over the wire, never through stdout/`text=True`
+subprocess capture, which would corrupt it).
 
 ## Project Config (AESBridge.csproj)
 - Target: net48 (x86) — must match EventScheduler.exe architecture
@@ -57,6 +65,43 @@ When in doubt, use reflection — it won't throw, just returns the fallback.
 
 ---
 
+## Encoding (`--encode-remote`) — the write-back direction
+
+`EncodeRemoteEntry(args)` builds a `string[]` matching AES's own
+`Match.GetMatchSerialization()` shape and `BinaryFormatter().Serialize()`s it
+to a file — the exact inverse of `DecodeRemoteEntry`. No custom
+`SerializationBinder` is needed here (binders are deserialization-only; a bare
+`string[]`/`System.String` round-trips identically regardless of which
+process wrote it).
+
+**Why the validation matters:** AES's own apply logic
+(`SchedulerFile.UpdateWithRemoteEntryData`, in the decompiled source — see
+root CLAUDE.md's "Score Write-Back") has **no try/catch anywhere**. A
+malformed payload throws on AES's live network-receive thread, not in our
+process. `ValidateEncodeArgs` is the only thing standing between a bad
+outbox command and a crash in the director's live AES session:
+
+| Check | Why (maps to a specific crash in `UpdateWithRemoteEntryData`) |
+|---|---|
+| `args.Length >= 6` | `strArray[4]`/`[5]` are read unconditionally before the set-pairs loop — `IndexOutOfRangeException` on a short array |
+| `(trailing) % 2 == 0` | The set-pairs loop reads two array slots per iteration; an odd trailing count throws on the dangling final element |
+| `Guid.TryParse(fileId)` | Not itself a crash risk (a bad GUID just never matches `SchedulerFile.FileID` and no-ops) — rejected anyway as a caller-bug signal |
+| `int.TryParse(matchId)` | `int.Parse` throws `FormatException` on non-numeric |
+| `int.TryParse(outcome)`, range `0-5` | `Match.OutcomeType` has 6 members; out-of-range doesn't throw (C# enum casts aren't validated) but corrupts `TypeOfOutcome` silently — rejected for data hygiene |
+| `int.TryParse(workTeamNumber)` | `int.Parse` throws on non-numeric; no enum bound, plain int index |
+| `int.TryParse(typeOfWorkTeam)`, range `0-9` | `Match.WorkTeamType` has exactly 10 members |
+| each set score `int.TryParse`, range `0-199` | `int.Parse` throws on non-numeric; the upper bound is a defensive sanity clamp, not an AES constraint |
+| decided outcome (`!= 0`) requires ≥1 set pair | Not a crash risk — a "decided, zero sets" match is unambiguously bad data, cheap to catch here |
+
+The encoder has no live `Match`/`SchedulerFile` loaded in this mode, so it
+**cannot** verify "does this include every currently-scored set for this
+match" — `UpdateWithRemoteEntryData` clears any `Sets` slot beyond what's
+supplied, so sending a partial list silently wipes later sets. That invariant
+is the caller's job (`monitor/aes_monitor.py`'s `_merge_for_encode`, see
+monitor/CLAUDE.md), not this validation.
+
+---
+
 ## Known Match Properties (AES.Scheduler.Model.Match)
 
 Confirmed present via reflection dump of EventScheduler_Release.exe:
@@ -66,6 +111,8 @@ Confirmed present via reflection dump of EventScheduler_Release.exe:
 | `FirstTeamText` | string | Team name with seed, e.g. "Sky High 17 Elite (GL)" |
 | `SecondTeamText` | string | Same for team 2 |
 | `WorkTeamText` | string | Ref/work team; empty string if not assigned |
+| `WorkTeamNumber` | int | Public. Raw index paired with `TypeOfWorkTeam` — emitted in JSON as `workTeamNumber` alongside the formatted `workTeam` text, needed (unmodified) by write-back's `--encode-remote` so a score-only correction doesn't clear an assigned work team |
+| `TypeOfWorkTeam` | Match.WorkTeamType | Public. Emitted as `typeOfWorkTeam` (enum name string, same style as `outcome`). 10 members: None, NextHigher, NextLower, PreviousWinner, PreviousLoser, InternalAbsolute, ExternalAbsolute, CustomText, AnotherMatchWinner, AnotherMatchLoser (int values 0-9) |
 | `ScoreText` | string | "25-20, 25-18" formatted |
 | `Sets` | Match.Set[] | All set slots; FirstTeamScore/SecondTeamScore are nullable int |
 | `ScheduledCourtText` | string | "Court 1" or "No Court" |
@@ -139,12 +186,15 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
 
 ```json
 {
-  "event":   { "name", "eventId", "startDate", "endDate", "lastUpdated", "manualAddition" },
+  "event":   { "name", "eventId", "startDate", "endDate", "lastUpdated", "fileId", "manualAddition" },
+  // fileId: SchedulerFile.FileID (Guid), one per tournament file — required as payload
+  // slot [0] when building a write-back RemoteEntryUpdate; see "Encoding (--encode-remote)"
   "courts":  [{ "courtId", "name" }],
   "matches": [{
     "matchId", "courtId", "courtName",
     "startTime", "endTime",   // UTC ISO 8601
     "matchLength",            // minutes
+    "workTeamNumber", "typeOfWorkTeam",  // raw fields behind the formatted "workTeam" text below
     "team1", "team2", "workTeam",
     "divisionCode", "divisionName", "playId", "playName", "playType",
     "outcome", "decided", "firstTeamWon",
@@ -217,6 +267,21 @@ field. That field is a display value only; it does not drive array order.
 
 The monitor's `_pool_payload()` reads `finishRank` straight from each `standings` entry
 (no longer derived positionally from array index).
+
+**Bug fix (2026-07-08) — placeholder team leaking into standings for pools with a 2-set
+playoff/tiebreaker:** `ComputeStandings()` used to register roster candidates (`Reg()`) from
+`allMatches` (round-robin + `Pool.PlayoffBracket` matches together) before filtering
+`IsFromPlayoffBracket` matches out of the win/loss computation. When AES has scheduled a
+pool's tiebreaker but its first match isn't decided yet, the second tiebreaker match's
+`FirstTeamText`/`SecondTeamText` is a placeholder like `"Winner of Match 1"` — that text got
+registered into `teams`, and since it's absent from `pool.Teams` (the real roster), `PoolJson()`'s
+"team present in standings but not in `pool.Teams`" fallback (meant to catch genuinely
+unexpected cases) re-appended it as a bogus all-zero standings row. Fixed by registering roster
+candidates from `regularMatches` (post-`IsFromPlayoffBracket`-filter) instead of `allMatches` —
+see `docs/ingest-api.md` in aes-tourney-director for the server-side description of this same
+placeholder-row quirk (that doc's guidance was to build `teams` from the roster and drop
+placeholder entries; this fix makes the bridge's own "roster" computation actually exclude them
+at the source instead of relying on the dashboard's name-pattern backstop filter).
 
 ---
 

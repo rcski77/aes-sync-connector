@@ -397,6 +397,135 @@ both his sample data and this project's own real event data (eventId `45029` →
 
 ---
 
+## Dashboard Outbox API (score write-back)
+
+Opt-in feature (`[aes] allow_writeback = true` in aes_config.ini, default `false`).
+The monitor polls this endpoint for pending score-correction commands and applies
+them into AES over the existing port-17471 connection — see "Score Write-Back"
+below for the connector-side mechanics (bridge `--encode-remote` mode, the
+`RemoteEntryUpdateAttached` write path). **This section is the contract the
+dashboard repo (aes-tourney-director) needs to implement — nothing here is
+implemented in this repo.** Scope: score/outcome corrections only (matches
+`RemoteEntryUpdateType.MatchData`) — no work-team reassignment, no seed/bracket
+edits. See `WRITE_BACK_EDITOR_SCOPING.md` for why this approach was chosen over
+a `.vsf` file editor.
+
+### GET /api/ingest/outbox
+Auth: `Authorization: Bearer <INGEST_API_KEY>` (same per-event key already used
+for `/delta` and `/snapshot` — scopes the request to one event/connector
+implicitly, no separate event-id param needed).
+
+Returns pending (not-yet-acked) score-correction commands for this event, oldest
+first. Recommend capping the response (e.g. 20) and collapsing to only the
+latest command per `matchId` if multiple corrections for the same match are
+queued — older ones are superseded, not meaningful to apply in sequence.
+
+Response 200:
+```json
+{
+  "commands": [
+    {
+      "id": "cmd_abc123",
+      "type": "score_correction",
+      "matchId": -51376,
+      "outcome": "FirstTeamWon",
+      "sets": [{"team1": 25, "team2": 10}, {"team1": 25, "team2": 12}],
+      "createdAt": "2026-07-10T18:02:11Z",
+      "requestedBy": "adam@example.com"
+    }
+  ]
+}
+```
+- `id`: dashboard-assigned, unique, used for ack.
+- `outcome`: optional. One of `Undecided | FirstTeamWon | SecondTeamWon | Tie |
+  FirstTeamForfeit | SecondTeamForfeit`. Omit to leave the match's current
+  outcome unchanged.
+- `sets`: **required if the correction touches scores.** Must be the FULL
+  corrected list of sets for the match, in order — not a partial diff. AES's
+  own apply logic (`SchedulerFile.UpdateWithRemoteEntryData`) clears any set
+  slot beyond what's sent, so an incomplete list silently wipes later sets.
+  Populate this from the dashboard's own current view of the match (itself fed
+  by our `/delta` and `/snapshot` pushes), not from a single-field edit. Omit
+  entirely only for an outcome-only correction (e.g. converting a match to
+  forfeit without touching set scores) — the monitor falls back to the last
+  sets it saw for that match.
+- `requestedBy`: optional, audit/log display only.
+
+### POST /api/ingest/outbox/{id}/ack
+Auth: same Bearer key. Sent once per command, after the monitor has attempted
+to apply it (successfully or not).
+
+Request:
+```json
+{ "status": "applied", "detail": null }
+```
+`status` is one of:
+- `applied` — sent to AES successfully. Terminal: do not re-return this
+  command id from GET again. This does **not** confirm AES's UI updated — AES
+  does not echo write-backs back to the sender on the same connection (it only
+  rebroadcasts to *other* connected clients), and there is no application-level
+  ack in the protocol. The correction should show up in the dashboard's own
+  state on the next `/delta` or `/snapshot` push from the connector (worst
+  case ~3 minutes later, on AES's own periodic broadcast timer) — treat that
+  as the actual confirmation signal, not this ack.
+- `rejected` — the connector's bridge validated the command as malformed (bad
+  outcome value, empty sets on a decided match, etc. — see bridge/CLAUDE.md's
+  `--encode-remote` validation table). Retrying the identical command will
+  fail again; surface this to the director rather than auto-retrying.
+- `failed` — transient (AES not connected, subprocess timeout, `fileId` not
+  yet known at monitor startup). Safe to leave pending and let it come back on
+  a later GET, or resubmit.
+
+Response 200: any body, dashboard just needs to record the ack. Ack delivery
+should be idempotent — a duplicate ack for an already-terminal command (e.g.
+the monitor retried after a network blip) should not error.
+
+Recommend: if a command has been outstanding (returned by GET, no ack seen)
+for longer than ~2 minutes, treat it as lost (monitor likely restarted before
+sending) and include it again in the next GET response.
+
+### Score Write-Back — connector-side mechanics
+
+`AESBridge.exe --encode-remote <outFile> <fileIdGuid> <matchId> <outcome>
+<workTeamNumber> <typeOfWorkTeam> [<t1> <t2> ...]` builds and validates a
+`RemoteEntryUpdateAttached` payload (see the "RemoteEntryUpdateAttached Payload
+Format" section above for field meaning) and writes the raw BinaryFormatter
+bytes to `outFile`. `monitor/aes_monitor.py` reads that file and sends it over
+the already-open AES connection via `cout.send(NCC_OBJECT,
+CMD_REMOTE_ENTRY_UPDATE, payload)`.
+
+**Wire framing detail worth getting permanently right:** the NCCommand byte
+for this write must be `NCC_OBJECT` (`0x23`, AES's `CommandWithObjectData`) —
+**not** `NCC_BINARY` (`0x22`, `CommandWithBinaryData`). AES's `CommandSet.
+GetData()` only runs the payload through `BinaryFormatter.Deserialize` when
+the NCCommand byte is `CommandWithObjectData`; framing it as `CommandWithBinaryData`
+instead makes AES hand `UpdateWithRemoteEntryData` a raw `byte[]`, and
+`string[] strArray = (string[]) data;` throws `InvalidCastException` on AES's
+live network-receive handler. `NCC_OBJECT` was already defined in
+`aes_monitor.py` (previously unused) — reuse it, don't redefine it.
+
+`fileId` (the tournament file's GUID, one per file, required as payload slot
+`[0]`) is captured from `tournament_data.json`'s `event.fileId` field (added
+to `AESBridge.cs`'s normal decode output for this purpose) on every regular
+`EventUpdateAttached` decode.
+
+**Verified against a real running AES test instance (2026-07-10):** a write
+applies, work-team fields survive an outcome/score-only correction unchanged
+(confirmed in AES's own UI — `WT: N` display matches `WorkTeamNumber + 1`,
+AES's own formatting), and reverting back to the original score also applies
+cleanly. One test-harness gotcha hit along the way, worth remembering for any
+future standalone test/debug script (not an issue for `monitor/aes_monitor.py`
+itself, whose main loop never does this): **don't close the socket
+immediately after `cout.send()`.** AES continuously pushes heartbeat frames in
+the background; if those go unread and the socket is closed abruptly right
+after sending, the OS can issue a TCP RST instead of a graceful close, which
+can abort the connection before AES's app layer (marshaled onto its UI thread
+via `Invoke()` — see `NetworkControl.nc_OnDataReceived`) finishes processing
+the just-sent write, so it silently never applies. A short read-loop drain (or
+just staying connected, as the production monitor already does) avoids this.
+
+---
+
 ## Production Deployment Architecture
 ```
 Windows laptop (runs AES Scheduler)
@@ -460,5 +589,7 @@ Auth: Authorization: Bearer <INGEST_API_KEY>
 - Adam: tournament director, 20yr experience, ~150 events/yr, Midwest-focused
 - Dashboard: Node.js/Express app in separate repo (aes-tourney-director), director-facing
 - No tablets used — only main AES UI for score entry
-- Future: bidirectional score submission possible via RemoteEntryUpdateAttached
-  (server on port 17471 accepts it from clients, applies + rebroadcasts)
+- Bidirectional score submission via RemoteEntryUpdateAttached — **implemented**
+  connector-side (bridge `--encode-remote` mode + monitor outbox poll/send, see
+  "Dashboard Outbox API" above); the dashboard repo still needs to implement
+  the outbox endpoint contract before this is usable end-to-end

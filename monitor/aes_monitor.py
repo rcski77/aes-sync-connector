@@ -12,7 +12,7 @@ Usage:  python aes_monitor.py
 """
 
 import os, sys, socket, struct, hashlib, base64, gzip, zlib, glob
-import subprocess, json, datetime, threading, time, re
+import subprocess, json, datetime, threading, time, re, queue
 import configparser, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
 
@@ -83,6 +83,14 @@ OUTCOMES = {
     '0': 'Undecided', '1': 'FirstTeamWon', '2': 'SecondTeamWon',
     '3': 'Tie', '4': 'FirstTeamForfeit', '5': 'SecondTeamForfeit',
 }
+OUTCOME_CODES = {v: k for k, v in OUTCOMES.items()}
+
+# Match.WorkTeamType enum order (index == the int AES expects) — see
+# WRITE_BACK_EDITOR_SCOPING.md / CLAUDE.md "Score Write-Back".
+WORK_TEAM_TYPES = ['None', 'NextHigher', 'NextLower', 'PreviousWinner', 'PreviousLoser',
+                    'InternalAbsolute', 'ExternalAbsolute', 'CustomText',
+                    'AnotherMatchWinner', 'AnotherMatchLoser']
+WORK_TEAM_TYPE_CODE = {name: i for i, name in enumerate(WORK_TEAM_TYPES)}
 
 # ── Cipher ─────────────────────────────────────────────────────────────────────
 
@@ -130,6 +138,8 @@ class Chan:
         f = struct.unpack('<I', self.r(1) + b'\x00\x00\x00')[0]
         d = self.r(n) if n else b''
         return decomp(d) if f & DATA_COMPRESSED else d
+    def send(self, nc, cc, data=None):
+        self.wcmd(nc); self.w(struct.pack('<I', cc)); self.wdata(data)
 
 # ── Raw framing ────────────────────────────────────────────────────────────────
 
@@ -203,7 +213,7 @@ def client_init(sock, password):
     cout.wcmd(NCC_CONN_INIT)
 
     sock.settimeout(None)
-    return cin
+    return cin, cout
 
 # ── Bridge ─────────────────────────────────────────────────────────────────────
 
@@ -249,6 +259,105 @@ def decode_remote_entry(raw, bridge_exe):
     except Exception:
         pass
     return None
+
+# ── Write-back (outbox) ─────────────────────────────────────────────────────────
+# Opt-in (aes_config.ini [aes] allow_writeback=true, default false). Lets the
+# dashboard push score corrections into AES over the same connection. See
+# CLAUDE.md "Dashboard Outbox API" for the endpoint contract and
+# WRITE_BACK_EDITOR_SCOPING.md for why this approach (a live RemoteEntryUpdate
+# write, not a .vsf file editor) was chosen.
+#
+# Only the main loop thread (the one already running cin's blocking recv) ever
+# calls cout.send() — poll_outbox only performs HTTP GETs against the dashboard
+# and hands parsed commands to the main loop via a thread-safe queue.
+
+def poll_outbox(base_url, ingest_key, timeout, poll_interval, out_q, stop_event):
+    """Background thread: GET pending score-correction commands from the
+    dashboard and push them onto out_q for the main loop to apply. Never
+    touches the AES socket."""
+    url = base_url.rstrip('/') + '/outbox'
+    while not stop_event.is_set():
+        try:
+            req = urllib.request.Request(url, headers={
+                'Authorization': f'Bearer {ingest_key}',
+                'User-Agent':    'aes-sync-connector/1.0',
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode('utf-8'))
+                for cmd in body.get('commands', []):
+                    out_q.put(cmd)
+        except Exception as e:
+            log(f"outbox poll failed: {e}")
+        stop_event.wait(poll_interval)
+
+
+def _merge_for_encode(cmd, tournament_data, file_id):
+    """Build the --encode-remote CLI args for one outbox command, merging with
+    the match's last-known full state. AES's UpdateWithRemoteEntryData
+    overwrites WorkTeamNumber/TypeOfWorkTeam unconditionally and clears any
+    Sets slot beyond what's supplied — so workTeamNumber/typeOfWorkTeam always
+    come from our own cached match info (never the incoming command; work-team
+    reassignment is out of scope), and `sets` falls back to the cached full
+    set list when the command omits it (an outcome-only correction)."""
+    match_id = cmd['matchId']
+    match_info = {}
+    for m in (tournament_data or {}).get('matches', []):
+        if m.get('matchId') == match_id:
+            match_info = m
+            break
+
+    outcome_name = cmd.get('outcome') or match_info.get('outcome')
+    outcome_code = OUTCOME_CODES.get(outcome_name, '0')
+
+    sets = cmd.get('sets')
+    if sets is None:
+        sets = match_info.get('sets', [])
+
+    work_team_number  = match_info.get('workTeamNumber', 0)
+    type_of_work_team = WORK_TEAM_TYPE_CODE.get(match_info.get('typeOfWorkTeam', 'None'), 0)
+
+    args = [file_id, str(match_id), str(outcome_code), str(work_team_number), str(type_of_work_team)]
+    for s in sets:
+        args += [str(s['team1']), str(s['team2'])]
+    return args
+
+
+def send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe):
+    """Encode and send one outbox command into AES over the live connection.
+    Returns (status, detail): 'applied' (sent, no local error), 'rejected'
+    (bridge validation failed — malformed input, don't retry as-is), or
+    'failed' (transient — AES not connected yet, subprocess timeout, fileId
+    not yet known — safe to retry)."""
+    if not bridge_exe:
+        return 'failed', 'AESBridge.exe not available'
+    if not file_id:
+        return 'failed', 'fileId not yet captured — waiting for first EventUpdate'
+    try:
+        args = _merge_for_encode(cmd, tournament_data, file_id)
+    except Exception as e:
+        return 'rejected', f'bad outbox command: {e}'
+
+    out_path = os.path.join(SCRIPT_DIR, 'remote_entry_out.bin')
+    try:
+        r = subprocess.run(
+            [bridge_exe, '--encode-remote', out_path] + args,
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode != 0:
+            return 'rejected', r.stderr.strip()[:200]
+        with open(out_path, 'rb') as f:
+            payload = f.read()
+        cout.send(NCC_OBJECT, CMD_REMOTE_ENTRY_UPDATE, payload)
+        return 'applied', None
+    except Exception as e:
+        return 'failed', str(e)
+
+
+def _ack_outbox(base_url, ingest_key, timeout, cmd_id, status, detail, cf_headers=None):
+    """POST the apply result back to the dashboard. Runs in a daemon thread,
+    like the delta/snapshot pushes."""
+    url = base_url.rstrip('/') + f'/outbox/{cmd_id}/ack'
+    _post(url, {'status': status, 'detail': detail}, ingest_key, timeout, f'outbox-ack({cmd_id})', cf_headers)
 
 # ── Dashboard push ─────────────────────────────────────────────────────────────
 
@@ -791,6 +900,8 @@ def monitor(cfg):
     cf_id       = cfg.get('dashboard', 'cf_client_id',    fallback='').strip()
     cf_secret   = cfg.get('dashboard', 'cf_client_secret',fallback='').strip()
     cf_headers  = {'CF-Access-Client-Id': cf_id, 'CF-Access-Client-Secret': cf_secret} if cf_id else None
+    allow_writeback       = cfg.getboolean('aes', 'allow_writeback', fallback=False)
+    outbox_poll_interval  = cfg.getint('dashboard', 'outbox_poll_interval', fallback=5)
 
     # Resolve bridge path relative to script directory
     bridge_rel = cfg.get('bridge', 'exe', fallback=r'..\bridge\bin\Release\net48\AESBridge.exe')
@@ -806,6 +917,7 @@ def monitor(cfg):
     print(f"  AES:       {host}:{port}")
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")
     print(f"  Ingest:    {base_url or '(not configured — set in aes_config.ini)'}")
+    print(f"  Write-back: {'ENABLED — dashboard corrections will be sent into AES' if allow_writeback else 'disabled (read-only)'}")
     print(f"  Press Ctrl+C to stop")
     print(f"{'─'*62}\n")
 
@@ -820,9 +932,19 @@ def monitor(cfg):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             sock.connect((host, port))
             log("Connected — completing handshake...")
-            cin = client_init(sock, password)
+            cin, cout = client_init(sock, password)
             sock.settimeout(1.0)   # lets Ctrl+C interrupt blocking recv on Windows
             log("Handshake complete ✓  —  waiting for data...\n")
+
+            current_file_id = None
+            outbox_q  = queue.Queue()
+            stop_poll = threading.Event()
+            if allow_writeback and base_url:
+                threading.Thread(
+                    target=poll_outbox,
+                    args=(base_url, ingest_key, timeout, outbox_poll_interval, outbox_q, stop_poll),
+                    daemon=True,
+                ).start()
 
             while True:
                 try:
@@ -830,6 +952,14 @@ def monitor(cfg):
                     cc   = cin.rint()
                     data = cin.rdata()
                 except socket.timeout:
+                    while allow_writeback and not outbox_q.empty():
+                        cmd = outbox_q.get_nowait()
+                        status, detail = send_score_correction(cmd, cout, prev_data, current_file_id, bridge_exe)
+                        threading.Thread(
+                            target=_ack_outbox,
+                            args=(base_url, ingest_key, timeout, cmd.get('id'), status, detail, cf_headers),
+                            daemon=True,
+                        ).start()
                     continue
 
                 if cc == CMD_EVENT_UPDATE and data:
@@ -837,6 +967,9 @@ def monitor(cfg):
                     curr    = call_bridge(data, bridge_exe)
                     changes = diff(prev_data, curr)
                     show_update(curr, len(data), update_num, changes)
+
+                    if curr and curr.get('event', {}).get('fileId'):
+                        current_file_id = curr['event']['fileId']
 
                     # Push snapshot on first connect or after interval has elapsed
                     if curr and base_url:
@@ -869,6 +1002,8 @@ def monitor(cfg):
 
         except KeyboardInterrupt:
             log("Shutting down.")
+            try: stop_poll.set()
+            except NameError: pass
             try: sock.close()
             except: pass
             break
@@ -877,6 +1012,8 @@ def monitor(cfg):
         except Exception as e:
             log(f"Error: {e}")
         finally:
+            try: stop_poll.set()
+            except NameError: pass
             try: sock.close()
             except: pass
 
