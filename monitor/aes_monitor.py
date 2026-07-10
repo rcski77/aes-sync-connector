@@ -263,9 +263,9 @@ def decode_remote_entry(raw, bridge_exe):
 # ── Write-back (outbox) ─────────────────────────────────────────────────────────
 # Opt-in (aes_config.ini [aes] allow_writeback=true, default false). Lets the
 # dashboard push score corrections into AES over the same connection. See
-# CLAUDE.md "Dashboard Outbox API" for the endpoint contract and
-# WRITE_BACK_EDITOR_SCOPING.md for why this approach (a live RemoteEntryUpdate
-# write, not a .vsf file editor) was chosen.
+# docs/DASHBOARD_OUTBOX_API.md for the endpoint contract and
+# docs/WRITE_BACK_EDITOR_SCOPING.md for why this approach (a live
+# RemoteEntryUpdate write, not a .vsf file editor) was chosen.
 #
 # Only the main loop thread (the one already running cin's blocking recv) ever
 # calls cout.send() — poll_outbox only performs HTTP GETs against the dashboard

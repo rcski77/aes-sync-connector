@@ -5,7 +5,7 @@ Inspect new AESBridge fields — diagnostic script, NOT part of the production p
 Runs AESBridge.exe against an existing SchedulerFile binary (default:
 scheduler_file.bin in this folder) and prints the three data structures added
 to tournament_data.json while researching the pool/bracket tree, final-place,
-and seed logic (see WRITE_BACK_EDITOR_SCOPING.md at the repo root):
+and seed logic (see docs/WRITE_BACK_EDITOR_SCOPING.md):
 
   - divisions[].finalPlaces        Division.FinalPlace — gold/silver/bronze
                                     groups and their seed resolution
