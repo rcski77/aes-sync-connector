@@ -2,6 +2,9 @@
 host     = 127.0.0.1
 port     = 17471
 password = your_aes_password
+; Opt-in: let the dashboard send score corrections into AES over this
+; connection (see CLAUDE.md "Dashboard Outbox API"). Default false.
+allow_writeback = false
 
 [bridge]
 exe = AESBridge.exe
@@ -10,6 +13,9 @@ exe = AESBridge.exe
 endpoint          = https://your-dashboard.com/api/ingest
 ingest_key        = your_ingest_api_key
 timeout           = 10
+; How often (seconds) to poll for pending score-correction commands when
+; allow_writeback is true. Ignored otherwise.
+outbox_poll_interval = 5
 ; Cloudflare Access service token — create one in Zero Trust > Access > Service Auth
 cf_client_id      = your-service-token-client-id.access
 cf_client_secret  = your-service-token-client-secret

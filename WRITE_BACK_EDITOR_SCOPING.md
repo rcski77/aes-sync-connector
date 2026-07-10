@@ -1,3 +1,17 @@
+> **Status update (2026-07-10):** Option (B) below is now **implemented**, not
+> just scoped — see root CLAUDE.md's "Dashboard Outbox API" / "Score
+> Write-Back" sections, `bridge/AESBridge.cs`'s `--encode-remote` mode, and
+> `monitor/aes_monitor.py`'s outbox poll/send/ack path. This also resolves
+> the two things this doc flagged as unverified assumptions: AES's server
+> does accept an inbound `RemoteEntryUpdateAttached` from a client (confirmed
+> against `NetworkControl.nc_OnDataReceived` in the decompiled source), and
+> it rebroadcasts to *other* connected clients only — not back to the sender
+> (so there's no in-protocol write confirmation; the correction surfaces on
+> the connector's own next snapshot/delta instead). Option (A) — the
+> file-level `.vsf` editor — remains unimplemented and unneeded unless a
+> future edit category (court/time reassignment, cosmetic renames) falls
+> outside what (B) can reach.
+
 # Write-Back Editor & Bracket/Seed Data — Research + Scoping Notes
 
 Captured from a research session investigating whether the decompiled

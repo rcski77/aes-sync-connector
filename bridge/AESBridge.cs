@@ -30,6 +30,11 @@ class AESBridge
                 return 0;
             }
 
+            // --encode-remote mode: build a RemoteEntryUpdateAttached BinaryFormatter
+            // payload (the write-back direction) from CLI args and write it to a file.
+            if (args.Length >= 1 && args[0] == "--encode-remote")
+                return EncodeRemoteEntry(args.Skip(1).ToArray());
+
             byte[] data;
             if (args.Length > 0 && File.Exists(args[0]))
                 data = File.ReadAllBytes(args[0]);
@@ -157,6 +162,76 @@ class AESBridge
     }
 #pragma warning restore SYSLIB0011
 
+    // ── Remote entry encoder ───────────────────────────────────────────────────
+    // Builds a RemoteEntryUpdateAttached BinaryFormatter payload (the write-back
+    // direction) — the inverse of DecodeRemoteEntry above. AES's own apply logic
+    // (SchedulerFile.UpdateWithRemoteEntryData) has no try/catch, so every check
+    // in ValidateEncodeArgs below maps to a specific crash traced in that method
+    // on AES's live network thread, not a style preference. No SerializationBinder
+    // is needed here (unlike decoding) — a bare string[] round-trips through
+    // BinaryFormatter identically regardless of which process writes it.
+
+    static int EncodeRemoteEntry(string[] a)
+    {
+        // a[0]=outFile a[1]=fileId a[2]=matchId a[3]=outcome a[4]=workTeamNumber
+        // a[5]=typeOfWorkTeam a[6..]=set score pairs (team1, team2, team1, team2, ...)
+        string err = ValidateEncodeArgs(a);
+        if (err != null) { Console.Error.WriteLine($"Error: {err}"); return 1; }
+
+        int trailing = a.Length - 6;
+        var arr = new string[6 + trailing];
+        arr[0] = a[1];       // FileID GUID, as-is
+        arr[1] = "33281";    // RemoteEntryUpdateType.MatchData — hardcoded, never caller-supplied
+        arr[2] = a[2];
+        arr[3] = a[3];
+        arr[4] = a[4];
+        arr[5] = a[5];
+        for (int i = 0; i < trailing; i++) arr[6 + i] = a[6 + i];
+
+        try
+        {
+#pragma warning disable SYSLIB0011
+            using var ms = new MemoryStream();
+            new BinaryFormatter().Serialize(ms, arr);
+            File.WriteAllBytes(a[0], ms.ToArray());
+#pragma warning restore SYSLIB0011
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+        return 0;
+    }
+
+    static string ValidateEncodeArgs(string[] a)
+    {
+        if (a.Length < 6)
+            return "usage: --encode-remote <outFile> <fileId> <matchId> <outcome> <workTeamNumber> <typeOfWorkTeam> [t1 t2 ...]";
+        if ((a.Length - 6) % 2 != 0)
+            return "trailing set-score values must come in (team1, team2) pairs";
+
+        if (!Guid.TryParse(a[1], out _)) return $"fileId is not a valid GUID: {a[1]}";
+        if (!int.TryParse(a[2], out _)) return $"matchId is not an integer: {a[2]}";
+
+        if (!int.TryParse(a[3], out int outcome) || outcome < 0 || outcome > 5)
+            return $"outcome must be an integer 0-5 (Match.OutcomeType): {a[3]}";
+        if (!int.TryParse(a[4], out _)) return $"workTeamNumber is not an integer: {a[4]}";
+        if (!int.TryParse(a[5], out int workTeamType) || workTeamType < 0 || workTeamType > 9)
+            return $"typeOfWorkTeam must be an integer 0-9 (Match.WorkTeamType): {a[5]}";
+
+        for (int i = 6; i < a.Length; i++)
+        {
+            if (!int.TryParse(a[i], out int score) || score < 0 || score > 199)
+                return $"set score out of range (0-199) or not an integer: {a[i]}";
+        }
+
+        if (outcome != 0 && a.Length == 6)
+            return "outcome is decided (non-Undecided) but no set scores were supplied";
+
+        return null;
+    }
+
     // ── Reflection helpers ─────────────────────────────────────────────────
     // Used for properties that are public in source but internal in the binary,
     // or where the decompiler showed a different name than the compiled assembly.
@@ -191,6 +266,7 @@ class AESBridge
         sb.AppendLine($"    \"startDate\":   {S(sf.Event.StartDate.ToString("yyyy-MM-dd"))},");
         sb.AppendLine($"    \"endDate\":     {S(sf.Event.EndDate.ToString("yyyy-MM-dd"))},");
         sb.AppendLine($"    \"lastUpdated\": {S(sf.LastUpdatedTimestamp.ToString("o"))},");
+        sb.AppendLine($"    \"fileId\":      {S(sf.FileID.ToString())},");
         sb.AppendLine($"    \"manualAddition\": {B(sf.Event.ManualAddition)}");
         sb.AppendLine("  },");
 
@@ -308,6 +384,8 @@ class AESBridge
         sb.Append($"\"team1\":        {S(m.FirstTeamText)}, ");
         sb.Append($"\"team2\":        {S(m.SecondTeamText)}, ");
         sb.Append($"\"workTeam\":     {S(m.WorkTeamText)}, ");
+        sb.Append($"\"workTeamNumber\": {m.WorkTeamNumber}, ");
+        sb.Append($"\"typeOfWorkTeam\": {S(m.TypeOfWorkTeam.ToString())}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
         sb.Append($"\"divisionName\": {S(divName)}, ");
         sb.Append($"\"playId\":       {playId}, ");
