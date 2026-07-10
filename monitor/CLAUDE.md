@@ -195,8 +195,12 @@ Fired on first connect and then every `SNAPSHOT_INTERVAL = 180` seconds.
 snapshot is always sent on connect.
 
 ```python
-push_snapshot(tournament_data, base_url, ingest_key, timeout)
+push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers, allow_writeback)
 ```
+Includes a top-level `writebackEnabled` field mirroring `allow_writeback` —
+lets the dashboard tell whether *this* connector will actually poll/apply
+outbox commands before it lets a director queue a correction. See
+`docs/DASHBOARD_OUTBOX_API.md`.
 
 Both functions spawn a daemon thread so they don't block the receive loop.
 
