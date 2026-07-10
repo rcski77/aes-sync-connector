@@ -324,6 +324,14 @@ Full tournament state — dashboard upserts everything and deletes absences.
 {
   "aesEventId": "33281",
   "aesEventIdKey": "PTAwMDAwMzMyODE90",
+  "writebackEnabled": true,  // this connector's [aes] allow_writeback config value — the
+                             // dashboard should gate outbox/score-correction UI on this,
+                             // not just assume it's on. See docs/DASHBOARD_OUTBOX_API.md.
+                             // Refreshed on every snapshot (connect + every ~3 min), so a
+                             // connector that goes offline mid-event will stop refreshing
+                             // it, not flip it to false — treat staleness of the whole
+                             // snapshot (not just this field) as the "connector is gone"
+                             // signal.
   "snapshotTime": "2025-06-28T17:00:00Z",
   "matches": [ ...same match shape as delta... ],
   "pools": [{

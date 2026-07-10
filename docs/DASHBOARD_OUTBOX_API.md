@@ -14,6 +14,18 @@ Feature is opt-in on the connector (`[aes] allow_writeback = true` in
 for their event, the connector never calls these endpoints. Scope: score and
 outcome corrections only — no work-team reassignment, no seed/bracket edits.
 
+**Check `writebackEnabled` before showing any correction UI.** Every
+`/api/ingest/snapshot` payload (the connector's existing full-state push, sent
+on connect and every ~3 minutes) includes a `writebackEnabled` boolean
+mirroring that connector's `allow_writeback` config value. If it's `false` (or
+the connector predates this field and it's simply absent), the connector never
+polls `GET .../outbox` at all — any command you queue would sit unacked
+forever with the director having no idea their correction was silently
+ignored. Gate the "correct this score" UI action on the most recent snapshot's
+`writebackEnabled` being `true`, and treat a stale/missing snapshot (no push
+in the last ~3-5 minutes) the same as `false` — the connector may be offline
+entirely.
+
 ## GET /api/ingest/outbox
 Auth: `Authorization: Bearer <INGEST_API_KEY>` (same per-event key already used
 for `/delta` and `/snapshot` — scopes the request to one event/connector
