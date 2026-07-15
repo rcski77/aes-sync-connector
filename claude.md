@@ -461,6 +461,16 @@ live network-receive handler. `NCC_OBJECT` was already defined in
 to `AESBridge.cs`'s normal decode output for this purpose) on every regular
 `EventUpdateAttached` decode.
 
+**AES never echoes a write-back to the connection that sent it** — only to
+*other* connected clients — so the normal `CMD_REMOTE_ENTRY_UPDATE` read
+branch (which fires `push_delta` for AES-initiated score entry) never sees a
+self-originated correction. `send_score_correction()` compensates by
+synthesizing the same `{'values': [...]}` shape itself from the args it just
+sent (discriminator `33281` reinserted at index 1) and returning it as
+`entry_obj`; the main loop calls `push_delta(entry_obj, ...)` on `'applied'`
+right after the send, so the dashboard doesn't have to wait out the ~3-minute
+snapshot interval to see its own correction reflected.
+
 **Verified against a real running AES test instance (2026-07-10):** a write
 applies, work-team fields survive an outcome/score-only correction unchanged
 (confirmed in AES's own UI — `WT: N` display matches `WorkTeamNumber + 1`,

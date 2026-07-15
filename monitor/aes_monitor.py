@@ -324,18 +324,23 @@ def _merge_for_encode(cmd, tournament_data, file_id):
 
 def send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe):
     """Encode and send one outbox command into AES over the live connection.
-    Returns (status, detail): 'applied' (sent, no local error), 'rejected'
-    (bridge validation failed — malformed input, don't retry as-is), or
-    'failed' (transient — AES not connected yet, subprocess timeout, fileId
-    not yet known — safe to retry)."""
+    Returns (status, detail, entry_obj): 'applied' (sent, no local error),
+    'rejected' (bridge validation failed — malformed input, don't retry
+    as-is), or 'failed' (transient — AES not connected yet, subprocess
+    timeout, fileId not yet known — safe to retry). entry_obj is only set on
+    'applied' — it's the same {'values': [...]} shape decode_remote_entry
+    would produce, built from the args we just sent, for the caller to feed
+    straight to push_delta(). AES never echoes a write-back to the connection
+    that sent it (only to *other* connected clients), so nothing will show up
+    on cin for this correction — the caller must push the delta itself."""
     if not bridge_exe:
-        return 'failed', 'AESBridge.exe not available'
+        return 'failed', 'AESBridge.exe not available', None
     if not file_id:
-        return 'failed', 'fileId not yet captured — waiting for first EventUpdate'
+        return 'failed', 'fileId not yet captured — waiting for first EventUpdate', None
     try:
         args = _merge_for_encode(cmd, tournament_data, file_id)
     except Exception as e:
-        return 'rejected', f'bad outbox command: {e}'
+        return 'rejected', f'bad outbox command: {e}', None
 
     out_path = os.path.join(SCRIPT_DIR, 'remote_entry_out.bin')
     try:
@@ -344,13 +349,18 @@ def send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe):
             capture_output=True, text=True, timeout=5
         )
         if r.returncode != 0:
-            return 'rejected', r.stderr.strip()[:200]
+            return 'rejected', r.stderr.strip()[:200], None
         with open(out_path, 'rb') as f:
             payload = f.read()
         cout.send(NCC_OBJECT, CMD_REMOTE_ENTRY_UPDATE, payload)
-        return 'applied', None
+        # Reinsert the RemoteEntryUpdateType.MatchData discriminator (33281) at
+        # index 1 — args has no slot for it (--encode-remote doesn't need it),
+        # but push_delta's vals[2]/[3]/[6:] indexing assumes the full wire shape.
+        vals = [args[0], '33281'] + args[1:]
+        entry_obj = {'values': vals}
+        return 'applied', None, entry_obj
     except Exception as e:
-        return 'failed', str(e)
+        return 'failed', str(e), None
 
 
 def _ack_outbox(base_url, ingest_key, timeout, cmd_id, status, detail, cf_headers=None):
@@ -965,7 +975,13 @@ def monitor(cfg):
                 except socket.timeout:
                     while allow_writeback and not outbox_q.empty():
                         cmd = outbox_q.get_nowait()
-                        status, detail = send_score_correction(cmd, cout, prev_data, current_file_id, bridge_exe)
+                        status, detail, entry_obj = send_score_correction(cmd, cout, prev_data, current_file_id, bridge_exe)
+                        if status == 'applied' and entry_obj and base_url:
+                            # AES won't echo this write-back to us, so push_delta
+                            # never fires from the CMD_REMOTE_ENTRY_UPDATE branch
+                            # below for a self-originated correction — push it now
+                            # instead of waiting up to 3 min for the next snapshot.
+                            push_delta(entry_obj, prev_data, base_url, ingest_key, timeout, cf_headers)
                         threading.Thread(
                             target=_ack_outbox,
                             args=(base_url, ingest_key, timeout, cmd.get('id'), status, detail, cf_headers),

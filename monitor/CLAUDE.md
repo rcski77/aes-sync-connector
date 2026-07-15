@@ -145,12 +145,19 @@ _merge_for_encode(cmd, tournament_data, file_id)
 send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe)
 # Calls AESBridge.exe --encode-remote, reads the resulting payload, sends it
 # via cout.send(NCC_OBJECT, CMD_REMOTE_ENTRY_UPDATE, payload).
-# Returns (status, detail):
+# Returns (status, detail, entry_obj):
 #   'applied'  — sent, no local error (does not confirm AES's UI updated —
-#                see root CLAUDE.md, AES never echoes writes back to sender)
+#                see root CLAUDE.md, AES never echoes writes back to sender).
+#                entry_obj is the same {'values': [...]} shape
+#                decode_remote_entry() produces (built from the args we just
+#                sent, with the 33281 discriminator reinserted at index 1) —
+#                the main loop feeds it straight to push_delta() since AES
+#                won't echo this write-back back to us for the normal
+#                CMD_REMOTE_ENTRY_UPDATE branch to pick up.
 #   'rejected' — bridge validation failed (malformed input) — don't retry as-is
+#                (entry_obj is None)
 #   'failed'   — transient (AES not connected, fileId not yet known, subprocess
-#                timeout) — safe to retry
+#                timeout) — safe to retry (entry_obj is None)
 ```
 
 ```python
