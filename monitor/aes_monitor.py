@@ -770,6 +770,8 @@ def _bracket_node_payload(node):
     return {
         'matchId':            m.get('matchId'),
         'matchName':          m.get('fullName', ''),
+        # Position in the bracket's match list; AES's scoresheet prints it as "Match #N".
+        'matchNumber':        m.get('number') or None,
         'firstTeam':          m.get('team1', ''),
         'secondTeam':         m.get('team2', ''),
         'firstTeamWon':       bool(m.get('firstTeamWon')),
@@ -797,6 +799,8 @@ def _bracket_payload(b):
         'date':             (root.get('scheduledStartTime') or '').split('T')[0],
         'bracketFullName':  b.get('fullName') or b.get('name', ''),
         'bracketShortName': b.get('shortName') or b.get('name', ''),
+        # Round-prefixed, e.g. "R1XO2" (vs bare "XO2") - what AES prints as Pool/Bracket on scoresheets.
+        'bracketFullShortName': b.get('fullShortName') or '',
         'matchFormat':      b.get('matchFormat', ''),
         'typeOfMatches':    b.get('typeOfMatches'),
         'setCount':         b.get('setCount'),

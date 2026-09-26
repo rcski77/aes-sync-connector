@@ -734,6 +734,11 @@ class AESBridge
 
         var m = mp.Match;
 
+        // 1-based position in the owning bracket's match list: AES's own scoresheet prints this as
+        // "Match #N" (ScoreSheetReportControl: owningPlay.Matches.IndexOf(m) + 1). 0 = unknown.
+        int number = 0;
+        try { number = Array.IndexOf(m.OwningPlay.Matches, m) + 1; } catch { }
+
         // Include all set slots so renderer knows max sets
         var allSets = m.Sets;
         var setsJson = new StringBuilder("[");
@@ -758,6 +763,7 @@ class AESBridge
         sb.Append($"\"doubleCapped\": {B(mp.DoubleCapped)}, ");
         sb.Append("\"match\": {");
         sb.Append($"\"matchId\":      {m.MatchID}, ");
+        sb.Append($"\"number\":       {number}, ");
         sb.Append($"\"shortName\":    {S(m.CompleteShortName)}, ");
         sb.Append($"\"fullName\":     {S(m.CompleteFullName)}, ");
         sb.Append($"\"team1\":        {S(m.FirstTeamText)}, ");
