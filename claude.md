@@ -277,6 +277,7 @@ the monitor transforms it into the ingest API payload shape before POSTing.
       "doubleCapped",     // bool — true for leaf nodes (first-round matches)
       "match": {
         "matchId", "shortName", "fullName", "team1", "team2",
+        "number",           // 1-based position in the bracket's Matches — AES scoresheet "Match #N"
         "courtId", "courtName", "startTime", "endTime",
         "outcome", "decided", "firstTeamWon", "secondTeamWon",
         "scoreText", "sets": [{ "team1", "team2" }]  // ALL set slots incl. unplayed (null)
@@ -388,10 +389,12 @@ Full tournament state — dashboard upserts everything and deletes absences.
     "bracketFullName": "Round 4 Championship Division",  // Bracket.CompleteFullName, unmodified
     "bracketShortName": "Gold",      // Bracket.ShortName (bare — fallback: CompleteShortName
                                       // e.g. "R4Gold" — if AES never populated ShortName)
+    "bracketFullShortName": "R4Gold", // Bracket.CompleteShortName — scoresheet Pool/Bracket label
     "matchFormat": "2 of 3 to 25(15)", "typeOfMatches": "BestOf", "setCount": 3,
     "pointsToWinNormalSet": 25, "pointsToWinDecidingSet": 15,  // same shape/meaning as pools above
     "root": {
       "matchId": -52833, "matchName": "Round 4 Championship Division Match 15",
+      "matchNumber": 7,               // position in the bracket's match list (AES "Match #7"); null if unknown
       "firstTeam": "Winner of Match 13", "secondTeam": "Winner of Match 14",
       "firstTeamWon": false, "secondTeamWon": false,
       "court": "North 77", "scheduledStartTime": "2026-07-01T15:00:00",
