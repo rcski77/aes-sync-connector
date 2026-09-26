@@ -41,6 +41,14 @@ On first build, `dist\aes_config.ini` is created from the template. Fill in your
 
 > **Note:** Requires Python 3.9+ and .NET SDK on PATH. `build.bat` will look for `dotnet` on PATH first, then fall back to `C:\Program Files\dotnet\dotnet.exe`.
 
+## Release
+
+Every push to `main` runs `.github/workflows/release.yml` on a GitHub-hosted Windows runner: it builds
+the same files as `build.bat` and publishes `aes-sync-connector.zip` as a GitHub release. The tournament
+director dashboard's CI bakes the latest release into its image, and directors download it from the
+event's Settings screen (director PIN required, since the zip includes `EventScheduler_Release.exe`).
+They also generate the per-event key and config file there.
+
 ## Deploy
 
 Copy the contents of `dist\` to the tournament laptop:
