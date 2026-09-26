@@ -1,0 +1,74 @@
+name: Release
+
+# Builds the Windows sync client and publishes it as a GitHub release. The tournament director
+# dashboard's CI (rcski77/aes-tourney-director, ci.yml) downloads the latest release's
+# aes-sync-connector.zip into its web image, and directors download it from the event's Settings
+# screen. The zip bundles AES's own EventScheduler_Release.exe, so the dashboard only serves it to
+# signed-in directors - never publicly.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Same steps as build.bat, into out/ so nothing from a committed dist/ leaks into the zip.
+          dotnet build bridge/AESBridge.csproj -c Release --nologo -v quiet
+          if ($LASTEXITCODE -ne 0) { throw "AESBridge build failed" }
+
+          python -m pip install --quiet pycryptodome pyinstaller==6.21.0
+          python -m PyInstaller --onefile --name aes_monitor --console `
+            --distpath out/pkg --workpath out/build --specpath out/build monitor/aes_monitor.py
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
+
+          Copy-Item bridge/bin/Release/net48/AESBridge.exe out/pkg/
+          Copy-Item bridge/bin/Release/net48/EventScheduler_Release.exe out/pkg/
+          Copy-Item monitor/aes_config.ini.example out/pkg/
+
+          @"
+          AES Sync Client
+          ===============
+
+          1. Unzip this folder onto the laptop running AES Scheduler.
+          2. On the tournament dashboard, open the event's Settings screen, generate the sync client key,
+             and download its config (connector-config-<event>.ini). Save it in this folder.
+          3. Open that .ini and fill in the AES Scheduler password under [aes].
+          4. Double-click aes_monitor.exe.
+
+          Keep only one config file in this folder. aes_config.ini.example shows every setting.
+          Build: $(git rev-parse --short HEAD)
+          "@ | Out-File -Encoding utf8 out/pkg/README.txt
+
+          # Explicit list - never zip up stray logs/configs from anything that ran in out/pkg.
+          $files = "aes_monitor.exe", "AESBridge.exe", "EventScheduler_Release.exe", "aes_config.ini.example", "README.txt"
+          Compress-Archive -Path ($files | ForEach-Object { "out/pkg/$_" }) -DestinationPath out/aes-sync-connector.zip -Force
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sha = git rev-parse --short HEAD
+          $tag = "build-${{ github.run_number }}-$sha"
+          gh release create $tag out/aes-sync-connector.zip --target $env:GITHUB_SHA `
+            --title "Sync client $tag" --notes "Built from $sha." --latest
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
