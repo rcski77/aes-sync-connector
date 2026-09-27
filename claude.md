@@ -150,9 +150,17 @@ PlasmaDisplayModeSelected= 12288   // Only needed for display protocol (port 192
 ```
 
 **Timing:**
-- Score entered in main AES UI → EventUpdateAttached within ~2 seconds
-- Also on 2-minute heartbeat timer
-- RemoteEntryUpdateAttached arrives alongside EventUpdate (within ~2s of score entry)
+- Edit in main AES UI (score, pool standings) → RemoteEntryUpdateAttached immediately
+- EventUpdateAttached (full file) is sent **only** on AES's fixed 2-minute timer
+  (`NetworkControl.UpdateThread`), plus on connect / file open-close / kiosk or
+  VolleyStation score sync — **not** on main-UI edits. (Earlier notes said "~2 s
+  after a score"; that was the timer happening to fire. Confirmed 2026-09-27:
+  standings set at 07:41:53 only arrived via the full update at 07:43:45, exactly
+  2 min after the previous one.) So anything real-time must come from
+  RemoteEntryUpdateAttached — see its payload types below.
+- RemoteEntryUpdateAttached slot [1] = RemoteEntryUpdateType: 33281 MatchData
+  (score → /delta, plus the pool's recomputed standings → /pool), 33282 FinishData (pool ranks → patched into cached pool,
+  /pool push), 33283 PlayoffData / 33537 OfficialScheduleData (ignored)
 - Auto-print batch (16896/16897/16898/17153) fires every ~60 seconds — ignore
 
 ---
@@ -343,7 +351,7 @@ Full tournament state — dashboard upserts everything and deletes absences.
                              // it, not flip it to false — treat staleness of the whole
                              // snapshot (not just this field) as the "connector is gone"
                              // signal.
-  "snapshotTime": "2025-06-28T17:00:00Z",
+  "snapshotTime": "2025-06-28T17:00:00.000Z",  // ms precision, same clock as /pool observedAt
   "matches": [ ...same match shape as delta... ],
   "pools": [{
     "playId": 11111,
@@ -505,12 +513,14 @@ AESBridge.exe
   │ writes monitor/tournament_data.json (intermediate)
   │
   ├── on RemoteEntryUpdate → POST /api/ingest/delta   (immediate)
-  └── on EventUpdate (throttled 3 min) → POST /api/ingest/snapshot
+  ├── on EventUpdate (throttled 3 min) → POST /api/ingest/snapshot
+  └── on EventUpdate, changed pools    → POST /api/ingest/pool (every update)
 
 Dashboard server (aes-tourney-director, Node.js/Express)
 ─────────────────────────────────────────────────────────
 POST /api/ingest/delta     ← upserts single match result
 POST /api/ingest/snapshot  ← upserts all matches + pools + brackets, deletes absences
+POST /api/ingest/pool      ← one pool's standings (docs/POOL_STANDINGS_PUSH.md)
 Auth: Authorization: Bearer <INGEST_API_KEY>
 ```
 
