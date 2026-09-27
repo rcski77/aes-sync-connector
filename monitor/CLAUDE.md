@@ -82,8 +82,8 @@ All bytes are decrypted via the inbound cipher state before parsing.
 **Commands handled:**
 | Command | Value | Action |
 |---|---|---|
-| `CMD_EVENT_UPDATE` | 16400 | Parse via AESBridge → throttled snapshot POST |
-| `CMD_REMOTE_ENTRY_UPDATE` | 16640 | Decode via AESBridge --remote → immediate delta POST |
+| `CMD_EVENT_UPDATE` | 16400 | Parse via AESBridge → throttled snapshot POST; between snapshots, POST `/pool` for each pool whose standings changed |
+| `CMD_REMOTE_ENTRY_UPDATE` | 16640 | Decode via AESBridge --remote, route on slot [1]: `33281` MatchData → immediate delta POST + `_apply_score_to_pool()` + immediate `/pool` POST if it's a pool match; `33282` FinishData → `_apply_finish_data()` + immediate `/pool` POST; others logged and ignored |
 | 16896 / 16897 / 16898 / 17153 | auto-print heartbeats | silently ignored |
 
 ---
@@ -209,7 +209,59 @@ lets the dashboard tell whether *this* connector will actually poll/apply
 outbox commands before it lets a director queue a correction. See
 `docs/DASHBOARD_OUTBOX_API.md`.
 
-Both functions spawn a daemon thread so they don't block the receive loop.
+`push_snapshot` also takes optional `now` / `gold_spots_map` (so the main loop
+computes each once per update) and returns the `pools[]` payloads it sent.
+
+### Pool standings — POST {base_url}/pool
+Snapshots are throttled to 3 min, deltas carry matches only, so without this a
+pool's standings/tiebreaker state lag its last result by up to 3 min. Contract:
+`docs/POOL_STANDINGS_PUSH.md`.
+
+```python
+push_pool(pool_payload, tournament_data, observed_at, base_url, ingest_key, timeout, cf_headers)
+# body: {aesEventId, aesEventIdKey, observedAt, pool: <exactly one _pool_payload() dict>}
+```
+On every `CMD_EVENT_UPDATE`:
+- One `now` is taken and used for both `snapshotTime` and every pool's
+  `observedAt` (both formatted by `_utc_iso_ms()`, millisecond precision). The
+  dashboard ignores a standings write observed earlier than what it has stored,
+  so the two must share a clock.
+- If a snapshot is due, it's sent and `last_sent_pools` is re-baselined to every
+  pool in it (no separate `/pool` pushes).
+- Otherwise each pool's `_pool_signature()` (a sorted-keys JSON of `teams` +
+  `goldSpotsCount` only, not date/courts/format) is compared to
+  `last_sent_pools[playId]`; only pools that differ are pushed. Pools with no
+  `playId` or empty `teams` are skipped.
+- `last_sent_pools` resets alongside `last_snapshot` on reconnect.
+
+**Standings set/cleared in Scheduler (FinishData).** AES sends the full file
+only on its 2-minute timer, never on a main-UI edit, so a standings change
+would otherwise wait up to 2 min. AES *does* immediately send a
+`RemoteEntryUpdateAttached` of type `33282` (FinishData):
+`[fileId, 33282, playId, rank per team in Play.Teams order ('' = unset)]`.
+`_apply_finish_data()` patches that into `prev_data`'s pool in place (the
+`teamAssignments` order the bridge emits is `pool.Teams` order, so ranks line
+up by index). `finishRank` goes onto both `teamAssignments[]` and `standings[]`.
+`exitSeed` is recomputed with AES's `ExitSeedIgnoringReseed` rule
+(`sorted(entrySeeds)[finishRank-1]`), or left null if any `reseedSeed` is set.
+The pool is then pushed through the same signature check. The next full update
+overwrites the patch with AES's real values, and it has a later `observedAt`.
+**Score entered in Scheduler (MatchData).** Same problem, same fix. After
+`push_delta`, `_apply_score_to_pool()` patches the entry into `prev_data`'s
+match (`_apply_match_data()`: outcome, decided, firstTeamWon, sets, scoreText).
+If the match is a regular pool match (`playType == 'pool'`, so not a tiebreaker),
+`_recompute_pool_standings()` rebuilds that pool's wins/losses/sets/points with
+the bridge's `ComputeStandings()` rules. It leaves `finishRank` alone, because
+that's AES's own value. The pool is then pushed through `_push_pool_if_changed()`.
+The write-back path does the same after an applied outbox correction. Checked
+against real bridge output (2026-09-27): recomputing every pool from its cached
+matches reproduced the bridge's `standings[]` exactly.
+
+This routing also stops FinishData payloads for 5+ team pools being misread as
+a score delta (with the playId as the matchId), which happened before because
+ranks landed in the set-score slots.
+
+All push functions spawn a daemon thread so they don't block the receive loop.
 
 ---
 
@@ -351,6 +403,7 @@ fixed -5h offset if zoneinfo is unavailable (no DST awareness in fallback).
 The main loop wraps the connection in a `while True` with a 5-second retry delay.
 On each new connection:
 - `last_snapshot` resets → snapshot fires on first `CMD_EVENT_UPDATE`
+- `last_sent_pools` resets → that snapshot re-baselines per-pool change detection
 - `prev_data` persists across reconnects so the diff still works after a brief disconnect
 
 ---

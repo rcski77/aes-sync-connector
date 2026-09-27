@@ -79,6 +79,10 @@ CMD_PRINTABLE_MATCHES    = 16897
 CMD_PRINTABLE_PLAYS      = 16898
 CMD_AUTO_PRINT_MATCHES   = 17153
 
+# RemoteEntryUpdateAttached payload slot [1] — AES's RemoteEntryUpdateType
+REMOTE_MATCH_DATA        = '33281'   # score entry
+REMOTE_FINISH_DATA       = '33282'   # pool finish ranks set/cleared
+
 OUTCOMES = {
     '0': 'Undecided', '1': 'FirstTeamWon', '2': 'SecondTeamWon',
     '3': 'Tie', '4': 'FirstTeamForfeit', '5': 'SecondTeamForfeit',
@@ -810,25 +814,198 @@ def _bracket_payload(b):
     }
 
 
-def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None, allow_writeback=False):
-    """POST full tournament state to /api/ingest/snapshot."""
+def _utc_iso_ms(dt):
+    """UTC datetime → 'YYYY-MM-DDTHH:MM:SS.mmmZ'. Shared by snapshotTime and the
+    /pool push's observedAt — the dashboard orders standings writes by these, so
+    both must come from the same clock at the same precision."""
+    return dt.astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.') + f'{dt.microsecond // 1000:03d}Z'
+
+
+def _pool_signature(pool_payload):
+    """Stable fingerprint of just the standings-relevant fields of a _pool_payload()
+    dict. Deliberately excludes date/courts/format fields so cosmetic churn there
+    doesn't trigger a /pool push."""
+    return json.dumps({'teams': pool_payload.get('teams'),
+                       'goldSpotsCount': pool_payload.get('goldSpotsCount')}, sort_keys=True)
+
+
+def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None, allow_writeback=False,
+                  now=None, gold_spots_map=None):
+    """POST full tournament state to /api/ingest/snapshot. Returns the pools[]
+    payloads it sent (so the caller can baseline per-pool change detection), or
+    None if nothing was sent."""
     if not base_url or not tournament_data:
-        return
+        return None
     event_id = str(tournament_data['event']['eventId'])
     brackets = [bp for b in tournament_data.get('brackets', [])
                 if (bp := _bracket_payload(b)) is not None]
-    gold_spots_map = _compute_gold_spots(tournament_data)
+    if gold_spots_map is None:
+        gold_spots_map = _compute_gold_spots(tournament_data)
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    pools = [_pool_payload(p, gold_spots_map) for p in tournament_data.get('pools', [])]
     payload = {
         'aesEventId':    event_id,
         'aesEventIdKey': _event_id_key(tournament_data),
         'writebackEnabled': allow_writeback,
-        'snapshotTime':  datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'snapshotTime':  _utc_iso_ms(now),
         'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
-        'pools':         [_pool_payload(p, gold_spots_map) for p in tournament_data.get('pools', [])],
+        'pools':         pools,
         'brackets':      brackets,
     }
     url = base_url.rstrip('/') + '/snapshot'
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot', cf_headers), daemon=True).start()
+    return pools
+
+
+def _apply_finish_data(tournament_data, vals):
+    """Apply a RemoteEntryUpdateType.FinishData payload — [fileId, '33282', playId,
+    rank per team in Play.Teams order ('' = unset)] — to tournament_data's cached
+    pool in place, mirroring SchedulerFile.UpdateWithRemoteEntryData. Returns the
+    patched pool dict, or None if it doesn't match a known pool.
+
+    AES sends this the moment a director sets/clears pool standings, but only
+    pushes the full SchedulerFile on its fixed 2-minute timer
+    (NetworkControl.UpdateThread, not on UI edits) — this is what lets /pool
+    reflect a standings change immediately. exitSeed is recomputed with AES's
+    own ExitSeedIgnoringReseed rule (sorted entry seeds[finishRank-1]); if the
+    pool has any reseedSeed set, AES may use that instead, so exitSeed is left
+    null until the next full update brings the real value."""
+    if not tournament_data or len(vals) < 3:
+        return None
+    try:    play_id = int(vals[2])
+    except: return None
+    pool = next((p for p in tournament_data.get('pools', []) if p.get('poolId') == play_id), None)
+    if not pool:
+        return None
+    tas = pool.get('teamAssignments') or []
+    ranks = vals[3:]
+    if len(ranks) != len(tas):
+        return None  # AES ignores a length mismatch too
+    parsed = []
+    for r in ranks:
+        try:    parsed.append(int(r))
+        except: parsed.append(None)
+    sorted_seeds = sorted(ta['entrySeed'] for ta in tas if ta.get('entrySeed') is not None)
+    reseeded = any(ta.get('reseedSeed') is not None for ta in tas)
+    rank_by_team = {}
+    for ta, rank in zip(tas, parsed):
+        ta['finishRank'] = rank
+        if reseeded or not rank or rank > len(sorted_seeds):
+            ta['exitSeed'] = None
+        else:
+            ta['exitSeed'] = sorted_seeds[rank - 1]
+        if ta.get('team'):
+            rank_by_team[ta['team']] = rank
+    for st in pool.get('standings', []):
+        if st.get('team') in rank_by_team:
+            st['finishRank'] = rank_by_team[st['team']]
+    return pool
+
+
+def _apply_match_data(tournament_data, vals):
+    """Apply a RemoteEntryUpdateType.MatchData payload — [fileId, '33281', matchId,
+    outcome, workTeamNumber, typeOfWorkTeam, t1, t2, ...] — to tournament_data's
+    cached match in place (outcome/decided/firstTeamWon/sets/scoreText), mirroring
+    SchedulerFile.UpdateWithRemoteEntryData. Returns the patched match or None."""
+    if not tournament_data or len(vals) < 4:
+        return None
+    try:    match_id = int(vals[2])
+    except: return None
+    m = next((x for x in tournament_data.get('matches', []) if x.get('matchId') == match_id), None)
+    if not m:
+        return None
+    sets = []
+    for i in range(6, len(vals) - 1, 2):
+        try:    sets.append({'team1': int(vals[i]), 'team2': int(vals[i + 1])})
+        except: pass
+    outcome = OUTCOMES.get(str(vals[3]), 'Undecided')
+    m['outcome']      = outcome
+    m['decided']      = outcome != 'Undecided'
+    m['firstTeamWon'] = outcome in ('FirstTeamWon', 'SecondTeamForfeit')   # Match.FirstTeamWon
+    m['sets']         = sets
+    m['scoreText']    = ', '.join(f"{s['team1']}-{s['team2']}" for s in sets)
+    return m
+
+
+def _recompute_pool_standings(tournament_data, pool_id):
+    """Recompute a cached pool's standings[] win/loss/set/point stats in place from
+    tournament_data's matches — same rules as the bridge's ComputeStandings()
+    (only the pool's own matches, not its tiebreaker bracket's; undecided matches
+    don't count; sets need both scores). finishRank is left alone: that's AES's
+    own value and only changes via FinishData / the next full update. Returns the
+    pool dict or None."""
+    pool = next((p for p in (tournament_data or {}).get('pools', []) if p.get('poolId') == pool_id), None)
+    if not pool:
+        return None
+    stats = {st.get('team'): {'wins': 0, 'losses': 0, 'setsWon': 0, 'setsLost': 0, 'ptsFor': 0, 'ptsAgainst': 0}
+             for st in pool.get('standings', [])}
+    def inc(team, key, by=1):
+        if team in stats:
+            stats[team][key] += by
+    for m in tournament_data.get('matches', []):
+        if m.get('playId') != pool_id or m.get('playType') != 'pool' or not m.get('decided'):
+            continue
+        t1, t2 = m.get('team1'), m.get('team2')
+        if m.get('outcome') in ('FirstTeamWon', 'SecondTeamForfeit'):
+            inc(t1, 'wins'); inc(t2, 'losses')
+        elif m.get('outcome') in ('SecondTeamWon', 'FirstTeamForfeit'):
+            inc(t2, 'wins'); inc(t1, 'losses')
+        for s in m.get('sets', []):
+            s1, s2 = s.get('team1'), s.get('team2')
+            if s1 is None or s2 is None:
+                continue
+            inc(t1, 'ptsFor', s1); inc(t1, 'ptsAgainst', s2)
+            inc(t2, 'ptsFor', s2); inc(t2, 'ptsAgainst', s1)
+            if s1 > s2:   inc(t1, 'setsWon'); inc(t2, 'setsLost')
+            elif s2 > s1: inc(t2, 'setsWon'); inc(t1, 'setsLost')
+    for st in pool.get('standings', []):
+        st.update(stats.get(st.get('team'), {}))
+    return pool
+
+
+def _push_pool_if_changed(pool, tournament_data, last_sent_pools, observed_at,
+                          base_url, ingest_key, timeout, cf_headers=None, gold_spots_map=None):
+    """Build one pool's payload and push it if its standings signature differs
+    from last_sent_pools (updated in place). Returns the payload if pushed."""
+    if gold_spots_map is None:
+        gold_spots_map = _compute_gold_spots(tournament_data)
+    pp = _pool_payload(pool, gold_spots_map)
+    play_id = pp.get('playId')
+    if not base_url or play_id is None or not pp.get('teams'):
+        return None
+    sig = _pool_signature(pp)
+    if last_sent_pools.get(play_id) == sig:
+        return None
+    push_pool(pp, tournament_data, observed_at, base_url, ingest_key, timeout, cf_headers)
+    last_sent_pools[play_id] = sig
+    return pp
+
+
+def _apply_score_to_pool(entry_obj, tournament_data):
+    """Patch a MatchData entry into the cached match and, if it's a regular pool
+    match, recompute that pool's standings. Returns the pool dict or None."""
+    m = _apply_match_data(tournament_data, (entry_obj or {}).get('values') or [])
+    if not m or m.get('playType') != 'pool':
+        return None
+    return _recompute_pool_standings(tournament_data, m.get('playId'))
+
+
+def push_pool(pool_payload, tournament_data, observed_at, base_url, ingest_key, timeout, cf_headers=None):
+    """POST one pool's standings to /api/ingest/pool. pool_payload is exactly a
+    _pool_payload() dict (same shape as snapshot.pools[]); observed_at is the
+    same UTC datetime used for the snapshotTime of this update."""
+    if not base_url or not tournament_data or not pool_payload:
+        return
+    event_id = str(tournament_data['event']['eventId'])
+    payload = {
+        'aesEventId':    event_id,
+        'aesEventIdKey': _event_id_key(tournament_data),
+        'observedAt':    _utc_iso_ms(observed_at),
+        'pool':          pool_payload,
+    }
+    url = base_url.rstrip('/') + '/pool'
+    label = f"pool({pool_payload.get('playId')})"
+    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, label, cf_headers), daemon=True).start()
 
 # ── Remote entry formatter ─────────────────────────────────────────────────────
 
@@ -951,6 +1128,7 @@ def monitor(cfg):
 
     while True:
         last_snapshot = None  # reset on each new connection → always push snapshot on connect
+        last_sent_pools = {}  # {playId: _pool_signature()} — re-baselined by that first snapshot
         log(f"Connecting to {host}:{port}...")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -986,6 +1164,11 @@ def monitor(cfg):
                             # below for a self-originated correction — push it now
                             # instead of waiting up to 3 min for the next snapshot.
                             push_delta(entry_obj, prev_data, base_url, ingest_key, timeout, cf_headers)
+                            pool = _apply_score_to_pool(entry_obj, prev_data)
+                            if pool:
+                                _push_pool_if_changed(pool, prev_data, last_sent_pools,
+                                                      datetime.datetime.now(datetime.timezone.utc),
+                                                      base_url, ingest_key, timeout, cf_headers)
                         threading.Thread(
                             target=_ack_outbox,
                             args=(base_url, ingest_key, timeout, cmd.get('id'), status, detail, cf_headers),
@@ -1002,27 +1185,77 @@ def monitor(cfg):
                     if curr and curr.get('event', {}).get('fileId'):
                         current_file_id = curr['event']['fileId']
 
-                    # Push snapshot on first connect or after interval has elapsed
+                    # Push snapshot on first connect or after interval has elapsed;
+                    # otherwise push just the pools whose standings changed.
+                    # One `now` for both snapshotTime and every observedAt.
                     if curr and base_url:
                         now = datetime.datetime.now(datetime.timezone.utc)
+                        gold_spots_map = _compute_gold_spots(curr)
                         if last_snapshot is None or (now - last_snapshot).total_seconds() >= SNAPSHOT_INTERVAL:
-                            push_snapshot(curr, base_url, ingest_key, timeout, cf_headers, allow_writeback)
+                            sent = push_snapshot(curr, base_url, ingest_key, timeout, cf_headers, allow_writeback,
+                                                 now=now, gold_spots_map=gold_spots_map)
                             last_snapshot = now
+                            last_sent_pools = {pp['playId']: _pool_signature(pp)
+                                               for pp in (sent or []) if pp.get('playId') is not None}
+                        else:
+                            pushed = []
+                            for p in curr.get('pools', []):
+                                pp = _push_pool_if_changed(p, curr, last_sent_pools, now, base_url, ingest_key,
+                                                           timeout, cf_headers, gold_spots_map)
+                                if pp:
+                                    pushed.append(pp.get('shortName') or str(pp.get('playId')))
+                            if pushed:
+                                log(f"pushed standings for {len(pushed)} pool(s): {', '.join(pushed)}")
 
                     if curr is not None:
                         prev_data = curr
 
                 elif cc == CMD_REMOTE_ENTRY_UPDATE and data:
-                    obj    = decode_remote_entry(data, bridge_exe)
-                    change = format_remote_entry(obj, prev_data)
-                    if change:
-                        print(f"  [{ts()}]{change}")
-                    else:
-                        log(f"RemoteEntryUpdate ({len(data)} bytes)")
+                    obj  = decode_remote_entry(data, bridge_exe)
+                    vals = (obj or {}).get('values') or []
+                    kind = str(vals[1]) if len(vals) > 1 else None
 
-                    # Push delta immediately
-                    if obj and base_url:
-                        push_delta(obj, prev_data, base_url, ingest_key, timeout, cf_headers)
+                    if kind == REMOTE_FINISH_DATA:
+                        # Pool standings set/cleared in Scheduler. AES won't send
+                        # the full file until its 2-min timer, so apply the ranks
+                        # to our cached copy and push the pool now.
+                        pool = _apply_finish_data(prev_data, vals)
+                        if not pool:
+                            log(f"STANDINGS  poolId={vals[2] if len(vals) > 2 else '?'}  (pool not in last update — will arrive with next full update)")
+                        else:
+                            pp = _pool_payload(pool, _compute_gold_spots(prev_data))
+                            label  = f"{pp.get('shortName') or pp.get('name') or '?'} (poolId={pp.get('playId')})"
+                            ranked = sorted((t for t in pp['teams'] if t['finishRank']), key=lambda t: t['finishRank'])
+                            detail = '  '.join(f"{t['finishRank']}. {t['name']}" for t in ranked) or 'cleared'
+                            print(f"  [{ts()}]  STANDINGS  {label}  →  {detail}")
+                            _push_pool_if_changed(pool, prev_data, last_sent_pools,
+                                                  datetime.datetime.now(datetime.timezone.utc),
+                                                  base_url, ingest_key, timeout, cf_headers)
+
+                    elif kind in (None, REMOTE_MATCH_DATA):
+                        change = format_remote_entry(obj, prev_data)
+                        if change:
+                            print(f"  [{ts()}]{change}")
+                        else:
+                            log(f"RemoteEntryUpdate ({len(data)} bytes)")
+
+                        # Push delta immediately
+                        if obj and base_url:
+                            push_delta(obj, prev_data, base_url, ingest_key, timeout, cf_headers)
+
+                        # AES won't send the full file until its 2-min timer, so
+                        # patch the score into our cached copy and push the
+                        # pool's recomputed standings now.
+                        pool = _apply_score_to_pool(obj, prev_data)
+                        if pool:
+                            _push_pool_if_changed(pool, prev_data, last_sent_pools,
+                                                  datetime.datetime.now(datetime.timezone.utc),
+                                                  base_url, ingest_key, timeout, cf_headers)
+
+                    else:
+                        # PlayoffData (pool tiebreaker seeds) / OfficialScheduleData —
+                        # not score entries; picked up by the next full update.
+                        log(f"RemoteEntryUpdate type={kind} ({len(data)} bytes) — ignored")
 
                 elif cc in (CMD_FINISHED_PLAYS, CMD_PRINTABLE_MATCHES,
                             CMD_PRINTABLE_PLAYS, CMD_AUTO_PRINT_MATCHES):
