@@ -159,8 +159,8 @@ PlasmaDisplayModeSelected= 12288   // Only needed for display protocol (port 192
   2 min after the previous one.) So anything real-time must come from
   RemoteEntryUpdateAttached — see its payload types below.
 - RemoteEntryUpdateAttached slot [1] = RemoteEntryUpdateType: 33281 MatchData
-  (score → /delta, plus the pool's recomputed standings → /pool), 33282 FinishData (pool ranks → patched into cached pool,
-  /pool push), 33283 PlayoffData / 33537 OfficialScheduleData (ignored)
+  (score → /delta, plus the pool's recomputed standings → /pool), 33282 FinishData (pool or bracket ranks → patched
+  into the cached play, /pool or /bracket push), 33283 PlayoffData / 33537 OfficialScheduleData (ignored)
 - Auto-print batch (16896/16897/16898/17153) fires every ~60 seconds — ignore
 
 ---
@@ -408,7 +408,11 @@ Full tournament state — dashboard upserts everything and deletes absences.
       "court": "North 77", "scheduledStartTime": "2026-07-01T15:00:00",
       "topSource": { ...recursive, full tree down to leaf matches... },
       "bottomSource": { ...recursive... }
-    }
+    },
+    "playId": -50054,                 // Bracket PlayID (bridge bracketId) — same value its matches carry
+    "teams": [                        // Play.Teams order; blank slots skipped, seed suffix stripped
+      { "name": "Forest Hills Eastern", "finishRank": null }  // null until staff finalize in Scheduler
+    ]
   }]
 }
 ```
@@ -514,13 +518,15 @@ AESBridge.exe
   │
   ├── on RemoteEntryUpdate → POST /api/ingest/delta   (immediate)
   ├── on EventUpdate (throttled 3 min) → POST /api/ingest/snapshot
-  └── on EventUpdate, changed pools    → POST /api/ingest/pool (every update)
+  ├── on EventUpdate, changed pools    → POST /api/ingest/pool (every update)
+  └── on EventUpdate, changed brackets → POST /api/ingest/bracket (every update)
 
 Dashboard server (aes-tourney-director, Node.js/Express)
 ─────────────────────────────────────────────────────────
 POST /api/ingest/delta     ← upserts single match result
 POST /api/ingest/snapshot  ← upserts all matches + pools + brackets, deletes absences
 POST /api/ingest/pool      ← one pool's standings (docs/POOL_STANDINGS_PUSH.md)
+POST /api/ingest/bracket   ← one bracket's teams/finish ranks (docs/BRACKET_STANDINGS_PUSH.md)
 Auth: Authorization: Bearer <INGEST_API_KEY>
 ```
 
