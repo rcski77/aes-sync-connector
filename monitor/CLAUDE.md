@@ -82,8 +82,8 @@ All bytes are decrypted via the inbound cipher state before parsing.
 **Commands handled:**
 | Command | Value | Action |
 |---|---|---|
-| `CMD_EVENT_UPDATE` | 16400 | Parse via AESBridge → throttled snapshot POST; between snapshots, POST `/pool` for each pool whose standings changed |
-| `CMD_REMOTE_ENTRY_UPDATE` | 16640 | Decode via AESBridge --remote, route on slot [1]: `33281` MatchData → immediate delta POST + `_apply_score_to_pool()` + immediate `/pool` POST if it's a pool match; `33282` FinishData → `_apply_finish_data()` + immediate `/pool` POST; others logged and ignored |
+| `CMD_EVENT_UPDATE` | 16400 | Parse via AESBridge → throttled snapshot POST; between snapshots, POST `/pool` for each pool whose standings changed and `/bracket` for each bracket whose teams changed |
+| `CMD_REMOTE_ENTRY_UPDATE` | 16640 | Decode via AESBridge --remote, route on slot [1]: `33281` MatchData → immediate delta POST + `_apply_score_to_pool()` + immediate `/pool` POST if it's a pool match; `33282` FinishData → `_apply_finish_data()` + immediate `/pool` POST, or (if the playId is a bracket) `_apply_bracket_finish_data()` + immediate `/bracket` POST; others logged and ignored |
 | 16896 / 16897 / 16898 / 17153 | auto-print heartbeats | silently ignored |
 
 ---
@@ -210,7 +210,7 @@ outbox commands before it lets a director queue a correction. See
 `docs/DASHBOARD_OUTBOX_API.md`.
 
 `push_snapshot` also takes optional `now` / `gold_spots_map` (so the main loop
-computes each once per update) and returns the `pools[]` payloads it sent.
+computes each once per update) and returns the `(pools[], brackets[])` payloads it sent.
 
 ### Pool standings — POST {base_url}/pool
 Snapshots are throttled to 3 min, deltas carry matches only, so without this a
@@ -256,6 +256,26 @@ that's AES's own value. The pool is then pushed through `_push_pool_if_changed()
 The write-back path does the same after an applied outbox correction. Checked
 against real bridge output (2026-09-27): recomputing every pool from its cached
 matches reproduced the bridge's `standings[]` exactly.
+
+### Bracket standings — POST {base_url}/bracket
+Same idea for crossovers/brackets, so the dashboard can tell when staff have
+finalized one (every team has a `finishRank`). Contract: `docs/BRACKET_STANDINGS_PUSH.md`.
+
+```python
+push_bracket(bracket_payload, tournament_data, observed_at, base_url, ingest_key, timeout, cf_headers)
+# body: {aesEventId, aesEventIdKey, observedAt, bracket: <exactly one _bracket_payload() dict>}
+```
+- `last_sent_brackets` (`{playId: _bracket_signature()}`, a sorted-keys JSON of
+  `teams` only) mirrors `last_sent_pools`: re-baselined from every bracket in a
+  due snapshot, otherwise `_push_bracket_if_changed()` pushes each bracket whose
+  signature differs, using the same `now` as `observedAt`. Brackets with no
+  `_bracket_payload()` (playoff tiebreakers, no root match yet) are never pushed.
+  In practice this fires when staff finalize a bracket or AES fills a slot.
+- FinishData (`33282`) applies to any Play, not just pools
+  (`SchedulerFile.UpdateWithRemoteEntryData`). If the playId isn't a pool,
+  `_apply_bracket_finish_data()` patches the cached bracket's
+  `teamAssignments[].finishRank` by index (length mismatch → ignored, like AES)
+  and the bracket is pushed through `_push_bracket_if_changed()`.
 
 This routing also stops FinishData payloads for 5+ team pools being misread as
 a score delta (with the playId as the matchId), which happened before because
@@ -391,6 +411,10 @@ in the bridge) to the dashboard's `docs/bracket-ingest-spec.md` shape:
   all the way to leaf (first-round) matches, not just final + semis
 - `secondTeamWon`: not a field the bridge emits for bracket match nodes — derived here as
   `outcome == 'SecondTeamWon'`
+- `playId`: the bridge's `bracketId` (the bracket's PlayID, same value its matches carry)
+- `teams`: one `{name, finishRank}` per `teamAssignments[]` entry in AES's order, blank
+  names skipped, `name` seed-stripped via `_strip_seed()`; `finishRank` is null until staff
+  finalize the bracket. Drives the dashboard's bracket finalize cards and the `/bracket` push.
 
 ### `_eastern_naive(iso_str)` → "YYYY-MM-DDTHH:MM:SS"
 Converts UTC ISO 8601 string to Eastern local time without offset.
@@ -403,7 +427,7 @@ fixed -5h offset if zoneinfo is unavailable (no DST awareness in fallback).
 The main loop wraps the connection in a `while True` with a 5-second retry delay.
 On each new connection:
 - `last_snapshot` resets → snapshot fires on first `CMD_EVENT_UPDATE`
-- `last_sent_pools` resets → that snapshot re-baselines per-pool change detection
+- `last_sent_pools` / `last_sent_brackets` reset → that snapshot re-baselines per-pool and per-bracket change detection
 - `prev_data` persists across reconnects so the diff still works after a brief disconnect
 
 ---

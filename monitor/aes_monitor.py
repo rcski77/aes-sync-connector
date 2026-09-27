@@ -811,6 +811,11 @@ def _bracket_payload(b):
         'pointsToWinNormalSet':   b.get('pointsToWinNormalSet'),
         'pointsToWinDecidingSet': b.get('pointsToWinDecidingSet'),
         'root':             root,
+        # Standings for the dashboard's finalize cards: finishRank stays null
+        # until staff finalize the bracket in Scheduler (docs/BRACKET_STANDINGS_PUSH.md).
+        'playId':           b.get('bracketId'),
+        'teams':            [{'name': _strip_seed(ta.get('team') or ''), 'finishRank': ta.get('finishRank')}
+                             for ta in (b.get('teamAssignments') or []) if ta.get('team')],
     }
 
 
@@ -829,11 +834,17 @@ def _pool_signature(pool_payload):
                        'goldSpotsCount': pool_payload.get('goldSpotsCount')}, sort_keys=True)
 
 
+def _bracket_signature(bracket_payload):
+    """Fingerprint of a _bracket_payload() dict's team list — the only part the
+    /bracket push is for, so tree/time churn doesn't trigger a push."""
+    return json.dumps(bracket_payload.get('teams'), sort_keys=True)
+
+
 def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None, allow_writeback=False,
                   now=None, gold_spots_map=None):
-    """POST full tournament state to /api/ingest/snapshot. Returns the pools[]
-    payloads it sent (so the caller can baseline per-pool change detection), or
-    None if nothing was sent."""
+    """POST full tournament state to /api/ingest/snapshot. Returns the (pools[],
+    brackets[]) payloads it sent (so the caller can baseline per-pool/per-bracket
+    change detection), or None if nothing was sent."""
     if not base_url or not tournament_data:
         return None
     event_id = str(tournament_data['event']['eventId'])
@@ -854,7 +865,7 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
     }
     url = base_url.rstrip('/') + '/snapshot'
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot', cf_headers), daemon=True).start()
-    return pools
+    return pools, brackets
 
 
 def _apply_finish_data(tournament_data, vals):
@@ -900,6 +911,28 @@ def _apply_finish_data(tournament_data, vals):
         if st.get('team') in rank_by_team:
             st['finishRank'] = rank_by_team[st['team']]
     return pool
+
+
+def _apply_bracket_finish_data(tournament_data, vals):
+    """FinishData counterpart of _apply_finish_data() for brackets — AES's
+    UpdateWithRemoteEntryData sets FinishRank on any Play, not just pools.
+    Patches the cached bracket's teamAssignments[].finishRank in place and
+    returns the bracket dict, or None if it doesn't match a known bracket."""
+    if not tournament_data or len(vals) < 3:
+        return None
+    try:    play_id = int(vals[2])
+    except: return None
+    bracket = next((b for b in tournament_data.get('brackets', []) if b.get('bracketId') == play_id), None)
+    if not bracket:
+        return None
+    tas = bracket.get('teamAssignments') or []
+    ranks = vals[3:]
+    if len(ranks) != len(tas):
+        return None  # AES ignores a length mismatch too
+    for ta, r in zip(tas, ranks):
+        try:    ta['finishRank'] = int(r)
+        except: ta['finishRank'] = None
+    return bracket
 
 
 def _apply_match_data(tournament_data, vals):
@@ -981,6 +1014,22 @@ def _push_pool_if_changed(pool, tournament_data, last_sent_pools, observed_at,
     return pp
 
 
+def _push_bracket_if_changed(bracket, tournament_data, last_sent_brackets, observed_at,
+                             base_url, ingest_key, timeout, cf_headers=None):
+    """Build one bracket's payload and push it if its teams signature differs
+    from last_sent_brackets (updated in place). Returns the payload if pushed.
+    Playoff (pool tiebreaker) and unseeded brackets have no payload and are skipped."""
+    bp = _bracket_payload(bracket)
+    if not base_url or not bp or bp.get('playId') is None:
+        return None
+    sig = _bracket_signature(bp)
+    if last_sent_brackets.get(bp['playId']) == sig:
+        return None
+    push_bracket(bp, tournament_data, observed_at, base_url, ingest_key, timeout, cf_headers)
+    last_sent_brackets[bp['playId']] = sig
+    return bp
+
+
 def _apply_score_to_pool(entry_obj, tournament_data):
     """Patch a MatchData entry into the cached match and, if it's a regular pool
     match, recompute that pool's standings. Returns the pool dict or None."""
@@ -1005,6 +1054,24 @@ def push_pool(pool_payload, tournament_data, observed_at, base_url, ingest_key, 
     }
     url = base_url.rstrip('/') + '/pool'
     label = f"pool({pool_payload.get('playId')})"
+    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, label, cf_headers), daemon=True).start()
+
+
+def push_bracket(bracket_payload, tournament_data, observed_at, base_url, ingest_key, timeout, cf_headers=None):
+    """POST one bracket's standings to /api/ingest/bracket — mirrors push_pool().
+    bracket_payload is exactly a _bracket_payload() dict (same shape as
+    snapshot.brackets[]); the server only stores its playId + teams from it."""
+    if not base_url or not tournament_data or not bracket_payload:
+        return
+    event_id = str(tournament_data['event']['eventId'])
+    payload = {
+        'aesEventId':    event_id,
+        'aesEventIdKey': _event_id_key(tournament_data),
+        'observedAt':    _utc_iso_ms(observed_at),
+        'bracket':       bracket_payload,
+    }
+    url = base_url.rstrip('/') + '/bracket'
+    label = f"bracket({bracket_payload.get('playId')})"
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, label, cf_headers), daemon=True).start()
 
 # ── Remote entry formatter ─────────────────────────────────────────────────────
@@ -1129,6 +1196,7 @@ def monitor(cfg):
     while True:
         last_snapshot = None  # reset on each new connection → always push snapshot on connect
         last_sent_pools = {}  # {playId: _pool_signature()} — re-baselined by that first snapshot
+        last_sent_brackets = {}  # {playId: _bracket_signature()} — likewise
         log(f"Connecting to {host}:{port}...")
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1186,7 +1254,7 @@ def monitor(cfg):
                         current_file_id = curr['event']['fileId']
 
                     # Push snapshot on first connect or after interval has elapsed;
-                    # otherwise push just the pools whose standings changed.
+                    # otherwise push just the pools/brackets whose standings changed.
                     # One `now` for both snapshotTime and every observedAt.
                     if curr and base_url:
                         now = datetime.datetime.now(datetime.timezone.utc)
@@ -1195,8 +1263,11 @@ def monitor(cfg):
                             sent = push_snapshot(curr, base_url, ingest_key, timeout, cf_headers, allow_writeback,
                                                  now=now, gold_spots_map=gold_spots_map)
                             last_snapshot = now
+                            sent_pools, sent_brackets = sent or ([], [])
                             last_sent_pools = {pp['playId']: _pool_signature(pp)
-                                               for pp in (sent or []) if pp.get('playId') is not None}
+                                               for pp in sent_pools if pp.get('playId') is not None}
+                            last_sent_brackets = {bp['playId']: _bracket_signature(bp)
+                                                  for bp in sent_brackets if bp.get('playId') is not None}
                         else:
                             pushed = []
                             for p in curr.get('pools', []):
@@ -1206,6 +1277,14 @@ def monitor(cfg):
                                     pushed.append(pp.get('shortName') or str(pp.get('playId')))
                             if pushed:
                                 log(f"pushed standings for {len(pushed)} pool(s): {', '.join(pushed)}")
+                            pushed = []
+                            for b in curr.get('brackets', []):
+                                bp = _push_bracket_if_changed(b, curr, last_sent_brackets, now, base_url,
+                                                              ingest_key, timeout, cf_headers)
+                                if bp:
+                                    pushed.append(bp.get('bracketFullShortName') or str(bp.get('playId')))
+                            if pushed:
+                                log(f"pushed standings for {len(pushed)} bracket(s): {', '.join(pushed)}")
 
                     if curr is not None:
                         prev_data = curr
@@ -1216,12 +1295,22 @@ def monitor(cfg):
                     kind = str(vals[1]) if len(vals) > 1 else None
 
                     if kind == REMOTE_FINISH_DATA:
-                        # Pool standings set/cleared in Scheduler. AES won't send
-                        # the full file until its 2-min timer, so apply the ranks
-                        # to our cached copy and push the pool now.
+                        # Pool/bracket standings set/cleared in Scheduler. AES
+                        # won't send the full file until its 2-min timer, so apply
+                        # the ranks to our cached copy and push the play now.
                         pool = _apply_finish_data(prev_data, vals)
-                        if not pool:
-                            log(f"STANDINGS  poolId={vals[2] if len(vals) > 2 else '?'}  (pool not in last update — will arrive with next full update)")
+                        bracket = None if pool else _apply_bracket_finish_data(prev_data, vals)
+                        if bracket:
+                            bp = _bracket_payload(bracket) or {}
+                            label  = f"{bracket.get('fullShortName') or bracket.get('name') or '?'} (bracketId={bracket.get('bracketId')})"
+                            ranked = sorted((t for t in bp.get('teams', []) if t['finishRank']), key=lambda t: t['finishRank'])
+                            detail = '  '.join(f"{t['finishRank']}. {t['name']}" for t in ranked) or 'cleared'
+                            print(f"  [{ts()}]  STANDINGS  {label}  →  {detail}")
+                            _push_bracket_if_changed(bracket, prev_data, last_sent_brackets,
+                                                     datetime.datetime.now(datetime.timezone.utc),
+                                                     base_url, ingest_key, timeout, cf_headers)
+                        elif not pool:
+                            log(f"STANDINGS  playId={vals[2] if len(vals) > 2 else '?'}  (play not in last update — will arrive with next full update)")
                         else:
                             pp = _pool_payload(pool, _compute_gold_spots(prev_data))
                             label  = f"{pp.get('shortName') or pp.get('name') or '?'} (poolId={pp.get('playId')})"
