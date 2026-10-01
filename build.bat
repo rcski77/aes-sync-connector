@@ -64,16 +64,11 @@ if errorlevel 1 (
 copy /y bridge\bin\Release\net48\AESBridge.exe dist\AESBridge.exe
 copy /y bridge\bin\Release\net48\EventScheduler_Release.exe dist\EventScheduler_Release.exe
 
-:: Copy config template only if no config exists yet (don't overwrite edited values on rebuild)
-if not exist dist\aes_config.ini (
-    copy monitor\aes_config.ini.example dist\aes_config.ini
-    echo Created dist\aes_config.ini from example — fill in your password, endpoint, and API key.
-) else (
-    echo Kept existing dist\aes_config.ini.
-)
-
-:: Ensure bridge exe path is set correctly for the flat deploy layout
-powershell -Command "(Get-Content dist\aes_config.ini) -replace '^exe\s*=.*', 'exe = AESBridge.exe' | Set-Content dist\aes_config.ini"
+:: Copy the config template as .example, like the release zip, so it never competes with a real config
+:: (aes_config.ini or a dashboard-downloaded connector-config-<eventId>.ini) copied in beside it.
+:: It already has exe = AESBridge.exe for this flat layout.
+copy /y monitor\aes_config.ini.example dist\aes_config.ini.example >nul
+echo Copied dist\aes_config.ini.example. Put your real config (aes_config.ini or connector-config-*.ini) next to it.
 
 echo.
 echo === Build complete — dist\ is ready to deploy ===
