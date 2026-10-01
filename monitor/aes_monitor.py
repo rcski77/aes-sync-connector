@@ -29,6 +29,35 @@ if getattr(sys, 'frozen', False):
 else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ── Build label ────────────────────────────────────────────────────────────────
+# Shown in the startup banner so it's clear which build is running. A built exe
+# carries monitor/_build_info.py, written by build.bat (local builds) or the
+# Release workflow (build-<run>-<sha>, the same name as its GitHub release) just
+# before PyInstaller runs. Running from source asks git instead, so a leftover
+# _build_info.py from an earlier build can't mislabel it.
+
+def _build_label():
+    if getattr(sys, 'frozen', False):
+        try:
+            from _build_info import BUILD
+            return BUILD
+        except ImportError:
+            return 'unknown build (built without build info)'
+    def git(*args):
+        r = subprocess.run(['git', *args], cwd=_BASE_DIR, capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else ''
+    try:
+        sha = git('rev-parse', '--short', 'HEAD')
+        if not sha:
+            return 'source (not a git checkout)'
+        branch = git('rev-parse', '--abbrev-ref', 'HEAD')
+        dirty = git('status', '--porcelain', '--', '../bridge/AESBridge.cs', 'aes_monitor.py')
+        return f"source {sha} ({branch}{', uncommitted changes' if dirty else ''})"
+    except Exception:
+        return 'source (git not available)'
+
+BUILD_LABEL = _build_label()
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 def find_config_path():
@@ -1310,6 +1339,7 @@ def monitor(cfg):
 
     print(f"\n{'═'*62}")
     print(f"  AES Sync Monitor")
+    print(f"  Version:   {BUILD_LABEL}")
     print(f"{'═'*62}")
     print(f"  AES:       {host}:{port}")
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")

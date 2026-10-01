@@ -32,6 +32,18 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
+:: Stamp the build label the monitor prints at startup (monitor\_build_info.py, gitignored):
+:: commit, branch, whether the monitor/bridge sources had uncommitted changes, and when.
+set BUILD_SHA=unknown
+for /f "delims=" %%i in ('git rev-parse --short HEAD 2^>nul') do set BUILD_SHA=%%i
+set BUILD_BRANCH=unknown branch
+for /f "delims=" %%i in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set BUILD_BRANCH=%%i
+set BUILD_DIRTY=
+git diff --quiet HEAD -- bridge/AESBridge.cs monitor/aes_monitor.py 2>nul || set BUILD_DIRTY=, uncommitted changes
+for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"') do set BUILD_DATE=%%i
+> monitor\_build_info.py echo BUILD = "local %BUILD_SHA% (%BUILD_BRANCH%%BUILD_DIRTY%), built %BUILD_DATE%"
+echo Build: local %BUILD_SHA% (%BUILD_BRANCH%%BUILD_DIRTY%), built %BUILD_DATE%
+
 :: Build single-file exe
 python -m PyInstaller ^
     --onefile ^
