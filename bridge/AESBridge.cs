@@ -297,6 +297,27 @@ class AESBridge
         return null;
     }
 
+    // ── Team names ─────────────────────────────────────────────────────────────
+    // AES's TeamText/FirstTeamText append the entry seed, " (17)", when the file's Seed Display Setting
+    // is Default or Always On, so names would change with a Scheduler display option (some events show
+    // seeds, some hide them). Team.GetTeamText(showRegionAbbr: true, showCode: false) is the name with its
+    // region abbreviation and never the seed or division: the same text TeamText gives with seeds off.
+    // A slot with no team yet falls back to AES's own text ("Winner of ...", "Pending Reseed").
+
+    static string TeamName(Play.TeamAssignment ta, Func<string> fallback)
+    {
+        try
+        {
+            var team = ta?.DivisionTeamAssignment?.Team;
+            if (team != null) return team.GetTeamText(true, false);
+        }
+        catch { }
+        try { return fallback(); } catch { return ""; }
+    }
+
+    static string T1(Match m) => TeamName(m.FirstTeam, () => m.FirstTeamText);
+    static string T2(Match m) => TeamName(m.SecondTeam, () => m.SecondTeamText);
+
     // ── Reflection helpers ─────────────────────────────────────────────────
     // Used for properties that are public in source but internal in the binary,
     // or where the decompiler showed a different name than the compiled assembly.
@@ -446,9 +467,9 @@ class AESBridge
         sb.Append($"\"startTime\":    {S(m.ScheduledStartDateTime.ToString("o"))}, ");
         sb.Append($"\"endTime\":      {S(m.ScheduledEndDateTime.ToString("o"))}, ");
         sb.Append($"\"matchLength\":  {m.MatchLength}, ");
-        sb.Append($"\"team1\":        {S(m.FirstTeamText)}, ");
-        sb.Append($"\"team2\":        {S(m.SecondTeamText)}, ");
-        sb.Append($"\"workTeam\":     {S(m.WorkTeamText)}, ");
+        sb.Append($"\"team1\":        {S(T1(m))}, ");
+        sb.Append($"\"team2\":        {S(T2(m))}, ");
+        sb.Append($"\"workTeam\":     {S(TeamName(m.WorkTeam, () => m.WorkTeamText))}, ");
         sb.Append($"\"workTeamNumber\": {m.WorkTeamNumber}, ");
         sb.Append($"\"typeOfWorkTeam\": {S(m.TypeOfWorkTeam.ToString())}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
@@ -572,7 +593,7 @@ class AESBridge
             foreach (var ta in pool.Teams)
             {
                 string tt;
-                try { tt = ta.TeamText; } catch { continue; }
+                try { tt = TeamName(ta, () => ta.TeamText); } catch { continue; }
                 if (string.IsNullOrEmpty(tt) || !usedTeams.Add(tt)) continue;
                 var st = standingByTeam.TryGetValue(tt, out var found) ? found : new Standing { Team = tt };
                 st.FinishRank = ta.FinishRank;
@@ -747,7 +768,7 @@ class AESBridge
     static string TeamAssignmentJson(Play.TeamAssignment ta)
     {
         string team = "";
-        try { team = ta.TeamText; } catch { }
+        try { team = TeamName(ta, () => ta.TeamText); } catch { }
 
         var sb = new StringBuilder("{");
         sb.Append($"\"teamNumber\": {ta.TeamNumber}, ");
@@ -831,8 +852,8 @@ class AESBridge
         sb.Append($"\"number\":       {number}, ");
         sb.Append($"\"shortName\":    {S(m.CompleteShortName)}, ");
         sb.Append($"\"fullName\":     {S(m.CompleteFullName)}, ");
-        sb.Append($"\"team1\":        {S(m.FirstTeamText)}, ");
-        sb.Append($"\"team2\":        {S(m.SecondTeamText)}, ");
+        sb.Append($"\"team1\":        {S(T1(m))}, ");
+        sb.Append($"\"team2\":        {S(T2(m))}, ");
         sb.Append($"\"courtId\":      {CourtId(m)}, ");
         sb.Append($"\"courtName\":    {S(m.ScheduledCourtText)}, ");
         sb.Append($"\"startTime\":    {S(m.ScheduledStartDateTime.ToString("o"))}, ");
@@ -881,7 +902,7 @@ class AESBridge
         void Reg(string t) { if (!string.IsNullOrEmpty(t) && seenTeams.Add(t)) teams.Add(t); }
 
         var allMatches = (pool.Matches ?? new Match[0])
-            .Where(m => !string.IsNullOrEmpty(m.FirstTeamText) && !string.IsNullOrEmpty(m.SecondTeamText))
+            .Where(m => !string.IsNullOrEmpty(T1(m)) && !string.IsNullOrEmpty(T2(m)))
             .ToArray();
 
         // Pool.Matches concatenates the pool's own round-robin matches with any
@@ -899,11 +920,11 @@ class AESBridge
         // used to leak into `teams`/`standings`, and since it's not a name in
         // pool.Teams either, PoolJson()'s "team present in standings but not in
         // pool.Teams" fallback re-appended it as a bogus all-zero standings row.
-        foreach (var m in regularMatches) { Reg(m.FirstTeamText); Reg(m.SecondTeamText); }
+        foreach (var m in regularMatches) { Reg(T1(m)); Reg(T2(m)); }
 
         foreach (var m in regularMatches)
         {
-            string t1 = m.FirstTeamText, t2 = m.SecondTeamText;
+            string t1 = T1(m), t2 = T2(m);
 
             if (m.TypeOfOutcome == Match.OutcomeType.Undecided) continue;
 

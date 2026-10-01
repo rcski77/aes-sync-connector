@@ -208,7 +208,11 @@ AESBridge.exe calls SchedulerFile.Load(bytes) from EventScheduler_Release.exe
 and outputs tournament_data.json.
 
 **Key property names in EventScheduler assembly:**
-- `m.FirstTeamText` / `m.SecondTeamText` / `m.WorkTeamText` — formatted team name with seed
+- `m.FirstTeamText` / `m.SecondTeamText` / `m.WorkTeamText` — formatted team name; adds the entry seed
+  " (17)" when the file's Seed Display Setting is Default or Always On. The bridge doesn't use these for
+  real teams: `TeamName()` takes `TeamAssignment.DivisionTeamAssignment.Team.GetTeamText(true, false)`
+  (name + region abbreviation, never the seed), so names don't change with that setting. Unfilled
+  slots ("Winner of ...", "Pending Reseed") still come from AES's own text.
 - `m.ScoreText` — "25-20, 25-18" formatted string
 - `m.Sets` — Match.Set[] where set.FirstTeamScore / set.SecondTeamScore are nullable int
 - `m.ScheduledCourtText` — "Court 1" or "No Court"
