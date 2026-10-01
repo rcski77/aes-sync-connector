@@ -12,7 +12,9 @@ return here, but it isn't necessary to implement this side.
 Feature is opt-in on the connector (`[aes] allow_writeback = true` in
 `aes_config.ini`, default `false`) — until a director explicitly turns it on
 for their event, the connector never calls these endpoints. Scope: score and
-outcome corrections only — no work-team reassignment, no seed/bracket edits.
+outcome corrections (`score_correction`), and pool/bracket finish ranks
+(`finish_ranks`, see below) — no work-team reassignment, no reseed seeds (AES
+takes no remote update for those).
 
 **Check `writebackEnabled` before showing any correction UI.** Every
 `/api/ingest/snapshot` payload (the connector's existing full-state push, sent
@@ -66,6 +68,54 @@ Response 200:
   touching set scores) — the connector falls back to the last sets it saw
   for that match.
 - `requestedBy`: optional, audit/log display only.
+
+### `finish_ranks` commands
+
+Set some or all of a pool's or bracket's finish ranks (the dashboard's ADR-016). The
+connector sends them to AES as a `FinishData` (`RemoteEntryUpdateType` 33282)
+update — the same payload AES's own Results Entry sends.
+
+```json
+{
+  "id": "cmd_def456",
+  "type": "finish_ranks",
+  "playId": -50054,
+  "finishRanks": [
+    { "teamNumber": 4, "rank": 17, "name": "Forest Hills Eastern" },
+    { "teamNumber": 9, "rank": 18, "name": "Sky High 17 Elite" }
+  ],
+  "overwrite": false,
+  "createdAt": "2026-10-02T18:02:11Z",
+  "requestedBy": null
+}
+```
+- `playId`: the pool's or bracket's PlayID (the same `playId` the `/pool` and
+  `/bracket` pushes carry).
+- `finishRanks`: only the teams to change. `teamNumber` is AES's
+  `Play.TeamAssignment.TeamNumber` — the team's 0-based index in the play's
+  `_Teams`, blank slots included — which `/pool` and `/bracket` now send on
+  every team as `teamNumber` (with `entrySeed`). `name` is optional; when
+  present the connector rejects the command if that slot now holds a
+  different team.
+- `overwrite`: optional, default `false`. Without it, a command that changes a
+  rank AES already has (to a different rank) is rejected.
+
+What the connector does with it:
+1. **Merge** with the play's current ranks from its cached copy (the last full
+   update, kept live by incoming `FinishData` updates), so teams the command
+   doesn't name keep their ranks. AES's payload needs one value per team slot.
+2. **Reject** (`rejected`, not retried) when a rank would end up held by two
+   teams (AES's `FinishRank` setter throws part-way through the update), when
+   an existing different rank would change without `overwrite`, when a rank is
+   outside 1..slot count, on a roster mismatch, or for a pool's own playoff
+   bracket (AES doesn't allow finishes there).
+3. **Send** it. AES assigns ranks slot by slot, so a reorder of ranks AES already
+   has (e.g. a swap, only with `overwrite`) goes out as two updates: clear the
+   changed slots, then set the final ranks.
+4. **Update the cache and re-push** `/pool` or `/bracket` right away — AES
+   doesn't echo an update back to the client that sent it.
+5. **Ack.** A play not in the cache yet, or no tournament file ID yet, is
+   `failed` (transient).
 
 ## POST /api/ingest/outbox/{id}/ack
 Auth: same Bearer key. Sent once per command, after the connector has

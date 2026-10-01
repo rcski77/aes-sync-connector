@@ -35,6 +35,11 @@ class AESBridge
             if (args.Length >= 1 && args[0] == "--encode-remote")
                 return EncodeRemoteEntry(args.Skip(1).ToArray());
 
+            // --encode-finish mode: build a FinishData (33282) payload — a play's finish
+            // ranks — for the dashboard's finish_ranks outbox command (ADR-016).
+            if (args.Length >= 1 && args[0] == "--encode-finish")
+                return EncodeFinishData(args.Skip(1).ToArray());
+
             byte[] data;
             if (args.Length > 0 && File.Exists(args[0]))
                 data = File.ReadAllBytes(args[0]);
@@ -232,6 +237,87 @@ class AESBridge
         return null;
     }
 
+    // ── Finish ranks encoder ───────────────────────────────────────────────────
+    // Builds a RemoteEntryUpdateAttached FinishData payload: [fileId, "33282", playId,
+    // rank per team in Play._Teams order], the same shape as AES's own
+    // Play.GetFinishRankSerialization(), where an unranked slot is "" (int?.ToString()).
+    // SchedulerFile.UpdateWithRemoteEntryData ignores the update unless there is one
+    // value per team slot, and assigns FinishRank slot by slot; the setter throws
+    // (on AES's network thread) on a rank above the team count or a rank another
+    // team in the play already holds. The count and duplicates are checked here;
+    // the monitor merges with the play's current ranks and orders writes so a
+    // one-by-one assignment never collides (see send_finish_ranks).
+
+    static int EncodeFinishData(string[] a)
+    {
+        // a[0]=outFile a[1]=fileId a[2]=playId a[3..]=one rank per team slot ("-" = no rank)
+        string err = ValidateFinishArgs(a);
+        if (err != null) { Console.Error.WriteLine($"Error: {err}"); return 1; }
+
+        int slots = a.Length - 3;
+        var arr = new string[3 + slots];
+        arr[0] = a[1];       // FileID GUID, as-is
+        arr[1] = "33282";    // RemoteEntryUpdateType.FinishData — hardcoded, never caller-supplied
+        arr[2] = a[2];
+        for (int i = 0; i < slots; i++) arr[3 + i] = a[3 + i] == "-" ? "" : a[3 + i];
+
+        try
+        {
+#pragma warning disable SYSLIB0011
+            using var ms = new MemoryStream();
+            new BinaryFormatter().Serialize(ms, arr);
+            File.WriteAllBytes(a[0], ms.ToArray());
+#pragma warning restore SYSLIB0011
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+        return 0;
+    }
+
+    static string ValidateFinishArgs(string[] a)
+    {
+        if (a.Length < 4)
+            return "usage: --encode-finish <outFile> <fileId> <playId> <rank|-> [<rank|-> ...] (one per team slot)";
+        if (!Guid.TryParse(a[1], out _)) return $"fileId is not a valid GUID: {a[1]}";
+        if (!int.TryParse(a[2], out _)) return $"playId is not an integer: {a[2]}";
+
+        int slots = a.Length - 3;
+        var seen = new HashSet<int>();
+        for (int i = 3; i < a.Length; i++)
+        {
+            if (a[i] == "-") continue;
+            if (!int.TryParse(a[i], out int rank) || rank < 1 || rank > slots)
+                return $"rank must be an integer 1-{slots} or '-': {a[i]}";
+            if (!seen.Add(rank))
+                return $"rank {rank} is given to more than one team";
+        }
+        return null;
+    }
+
+    // ── Team names ─────────────────────────────────────────────────────────────
+    // AES's TeamText/FirstTeamText append the entry seed, " (17)", when the file's Seed Display Setting
+    // is Default or Always On, so names would change with a Scheduler display option (some events show
+    // seeds, some hide them). Team.GetTeamText(showRegionAbbr: true, showCode: false) is the name with its
+    // region abbreviation and never the seed or division: the same text TeamText gives with seeds off.
+    // A slot with no team yet falls back to AES's own text ("Winner of ...", "Pending Reseed").
+
+    static string TeamName(Play.TeamAssignment ta, Func<string> fallback)
+    {
+        try
+        {
+            var team = ta?.DivisionTeamAssignment?.Team;
+            if (team != null) return team.GetTeamText(true, false);
+        }
+        catch { }
+        try { return fallback(); } catch { return ""; }
+    }
+
+    static string T1(Match m) => TeamName(m.FirstTeam, () => m.FirstTeamText);
+    static string T2(Match m) => TeamName(m.SecondTeam, () => m.SecondTeamText);
+
     // ── Reflection helpers ─────────────────────────────────────────────────
     // Used for properties that are public in source but internal in the binary,
     // or where the decompiler showed a different name than the compiled assembly.
@@ -381,9 +467,9 @@ class AESBridge
         sb.Append($"\"startTime\":    {S(m.ScheduledStartDateTime.ToString("o"))}, ");
         sb.Append($"\"endTime\":      {S(m.ScheduledEndDateTime.ToString("o"))}, ");
         sb.Append($"\"matchLength\":  {m.MatchLength}, ");
-        sb.Append($"\"team1\":        {S(m.FirstTeamText)}, ");
-        sb.Append($"\"team2\":        {S(m.SecondTeamText)}, ");
-        sb.Append($"\"workTeam\":     {S(m.WorkTeamText)}, ");
+        sb.Append($"\"team1\":        {S(T1(m))}, ");
+        sb.Append($"\"team2\":        {S(T2(m))}, ");
+        sb.Append($"\"workTeam\":     {S(TeamName(m.WorkTeam, () => m.WorkTeamText))}, ");
         sb.Append($"\"workTeamNumber\": {m.WorkTeamNumber}, ");
         sb.Append($"\"typeOfWorkTeam\": {S(m.TypeOfWorkTeam.ToString())}, ");
         sb.Append($"\"divisionCode\": {S(divCode)}, ");
@@ -507,7 +593,7 @@ class AESBridge
             foreach (var ta in pool.Teams)
             {
                 string tt;
-                try { tt = ta.TeamText; } catch { continue; }
+                try { tt = TeamName(ta, () => ta.TeamText); } catch { continue; }
                 if (string.IsNullOrEmpty(tt) || !usedTeams.Add(tt)) continue;
                 var st = standingByTeam.TryGetValue(tt, out var found) ? found : new Standing { Team = tt };
                 st.FinishRank = ta.FinishRank;
@@ -682,7 +768,7 @@ class AESBridge
     static string TeamAssignmentJson(Play.TeamAssignment ta)
     {
         string team = "";
-        try { team = ta.TeamText; } catch { }
+        try { team = TeamName(ta, () => ta.TeamText); } catch { }
 
         var sb = new StringBuilder("{");
         sb.Append($"\"teamNumber\": {ta.TeamNumber}, ");
@@ -766,8 +852,8 @@ class AESBridge
         sb.Append($"\"number\":       {number}, ");
         sb.Append($"\"shortName\":    {S(m.CompleteShortName)}, ");
         sb.Append($"\"fullName\":     {S(m.CompleteFullName)}, ");
-        sb.Append($"\"team1\":        {S(m.FirstTeamText)}, ");
-        sb.Append($"\"team2\":        {S(m.SecondTeamText)}, ");
+        sb.Append($"\"team1\":        {S(T1(m))}, ");
+        sb.Append($"\"team2\":        {S(T2(m))}, ");
         sb.Append($"\"courtId\":      {CourtId(m)}, ");
         sb.Append($"\"courtName\":    {S(m.ScheduledCourtText)}, ");
         sb.Append($"\"startTime\":    {S(m.ScheduledStartDateTime.ToString("o"))}, ");
@@ -816,7 +902,7 @@ class AESBridge
         void Reg(string t) { if (!string.IsNullOrEmpty(t) && seenTeams.Add(t)) teams.Add(t); }
 
         var allMatches = (pool.Matches ?? new Match[0])
-            .Where(m => !string.IsNullOrEmpty(m.FirstTeamText) && !string.IsNullOrEmpty(m.SecondTeamText))
+            .Where(m => !string.IsNullOrEmpty(T1(m)) && !string.IsNullOrEmpty(T2(m)))
             .ToArray();
 
         // Pool.Matches concatenates the pool's own round-robin matches with any
@@ -834,11 +920,11 @@ class AESBridge
         // used to leak into `teams`/`standings`, and since it's not a name in
         // pool.Teams either, PoolJson()'s "team present in standings but not in
         // pool.Teams" fallback re-appended it as a bogus all-zero standings row.
-        foreach (var m in regularMatches) { Reg(m.FirstTeamText); Reg(m.SecondTeamText); }
+        foreach (var m in regularMatches) { Reg(T1(m)); Reg(T2(m)); }
 
         foreach (var m in regularMatches)
         {
-            string t1 = m.FirstTeamText, t2 = m.SecondTeamText;
+            string t1 = T1(m), t2 = T2(m);
 
             if (m.TypeOfOutcome == Match.OutcomeType.Undecided) continue;
 

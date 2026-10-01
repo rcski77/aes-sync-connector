@@ -35,6 +35,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "AESBridge build failed" }
 
           python -m pip install --quiet pycryptodome pyinstaller==6.21.0
+          # The label the monitor prints at startup - the same name as the release published below.
+          $sha = git rev-parse --short HEAD
+          "BUILD = `"build-${{ github.run_number }}-$sha`"" | Out-File -Encoding utf8NoBOM monitor/_build_info.py
           python -m PyInstaller --onefile --name aes_monitor --console `
             --distpath out/pkg --workpath out/build --specpath out/build monitor/aes_monitor.py
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }

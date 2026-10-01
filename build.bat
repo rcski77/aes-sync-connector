@@ -32,6 +32,18 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
+:: Stamp the build label the monitor prints at startup (monitor\_build_info.py, gitignored):
+:: commit, branch, whether the monitor/bridge sources had uncommitted changes, and when.
+set BUILD_SHA=unknown
+for /f "delims=" %%i in ('git rev-parse --short HEAD 2^>nul') do set BUILD_SHA=%%i
+set BUILD_BRANCH=unknown branch
+for /f "delims=" %%i in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set BUILD_BRANCH=%%i
+set BUILD_DIRTY=
+git diff --quiet HEAD -- bridge/AESBridge.cs monitor/aes_monitor.py 2>nul || set BUILD_DIRTY=, uncommitted changes
+for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"') do set BUILD_DATE=%%i
+> monitor\_build_info.py echo BUILD = "local %BUILD_SHA% (%BUILD_BRANCH%%BUILD_DIRTY%), built %BUILD_DATE%"
+echo Build: local %BUILD_SHA% (%BUILD_BRANCH%%BUILD_DIRTY%), built %BUILD_DATE%
+
 :: Build single-file exe
 python -m PyInstaller ^
     --onefile ^
@@ -52,16 +64,11 @@ if errorlevel 1 (
 copy /y bridge\bin\Release\net48\AESBridge.exe dist\AESBridge.exe
 copy /y bridge\bin\Release\net48\EventScheduler_Release.exe dist\EventScheduler_Release.exe
 
-:: Copy config template only if no config exists yet (don't overwrite edited values on rebuild)
-if not exist dist\aes_config.ini (
-    copy monitor\aes_config.ini.example dist\aes_config.ini
-    echo Created dist\aes_config.ini from example — fill in your password, endpoint, and API key.
-) else (
-    echo Kept existing dist\aes_config.ini.
-)
-
-:: Ensure bridge exe path is set correctly for the flat deploy layout
-powershell -Command "(Get-Content dist\aes_config.ini) -replace '^exe\s*=.*', 'exe = AESBridge.exe' | Set-Content dist\aes_config.ini"
+:: Copy the config template as .example, like the release zip, so it never competes with a real config
+:: (aes_config.ini or a dashboard-downloaded connector-config-<eventId>.ini) copied in beside it.
+:: It already has exe = AESBridge.exe for this flat layout.
+copy /y monitor\aes_config.ini.example dist\aes_config.ini.example >nul
+echo Copied dist\aes_config.ini.example. Put your real config (aes_config.ini or connector-config-*.ini) next to it.
 
 echo.
 echo === Build complete — dist\ is ready to deploy ===

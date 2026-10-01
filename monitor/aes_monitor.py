@@ -29,6 +29,35 @@ if getattr(sys, 'frozen', False):
 else:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ── Build label ────────────────────────────────────────────────────────────────
+# Shown in the startup banner so it's clear which build is running. A built exe
+# carries monitor/_build_info.py, written by build.bat (local builds) or the
+# Release workflow (build-<run>-<sha>, the same name as its GitHub release) just
+# before PyInstaller runs. Running from source asks git instead, so a leftover
+# _build_info.py from an earlier build can't mislabel it.
+
+def _build_label():
+    if getattr(sys, 'frozen', False):
+        try:
+            from _build_info import BUILD
+            return BUILD
+        except ImportError:
+            return 'unknown build (built without build info)'
+    def git(*args):
+        r = subprocess.run(['git', *args], cwd=_BASE_DIR, capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else ''
+    try:
+        sha = git('rev-parse', '--short', 'HEAD')
+        if not sha:
+            return 'source (not a git checkout)'
+        branch = git('rev-parse', '--abbrev-ref', 'HEAD')
+        dirty = git('status', '--porcelain', '--', '../bridge/AESBridge.cs', 'aes_monitor.py')
+        return f"source {sha} ({branch}{', uncommitted changes' if dirty else ''})"
+    except Exception:
+        return 'source (git not available)'
+
+BUILD_LABEL = _build_label()
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 def find_config_path():
@@ -367,6 +396,127 @@ def send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe):
         return 'failed', str(e), None
 
 
+class FinishRejected(Exception):
+    """A finish_ranks command that would fail in AES as-is - acked 'rejected'."""
+
+
+def _find_play(tournament_data, play_id):
+    """The cached pool or bracket with this PlayID: ('pool'|'bracket', dict) or (None, None)."""
+    for p in (tournament_data or {}).get('pools', []):
+        if p.get('poolId') == play_id:
+            return 'pool', p
+    for b in (tournament_data or {}).get('brackets', []):
+        if b.get('bracketId') == play_id:
+            return 'bracket', b
+    return None, None
+
+
+def _merge_finish_ranks(cmd, tournament_data):
+    """Merge a finish_ranks command with the play's current cached ranks (kept live
+    by incoming FinishData updates), so only the targeted teams change. Returns
+    (kind, play, current, final): per-slot rank lists in Play._Teams order, before
+    and after. Raises FinishRejected for a command AES would throw on part-way (a
+    rank another team holds) or one that changes an existing, different rank
+    without `overwrite`; LookupError while the play isn't cached yet (transient)."""
+    play_id = int(cmd['playId'])
+    kind, play = _find_play(tournament_data, play_id)
+    if not play:
+        raise LookupError(f'play {play_id} not in the last full update yet')
+    if kind == 'bracket' and play.get('isPlayoff'):
+        raise FinishRejected("AES doesn't allow finishes on a pool's playoff bracket")
+    tas = play.get('teamAssignments') or []
+    if not tas:
+        raise LookupError(f'play {play_id} has no team slots cached')
+
+    current = [ta.get('finishRank') for ta in tas]
+    final = list(current)
+    overwrite = bool(cmd.get('overwrite'))
+    changes = cmd.get('finishRanks') or []
+    if not changes:
+        raise FinishRejected('no finish ranks in the command')
+    for ch in changes:
+        tn, rank = int(ch['teamNumber']), int(ch['rank'])
+        if tn < 0 or tn >= len(tas):
+            raise FinishRejected(f'team #{tn} is not a slot in this play')
+        name = ch.get('name')
+        slot_name = _strip_seed(tas[tn].get('team') or '')
+        if name and slot_name.lower() != _strip_seed(name).lower():
+            raise FinishRejected(f'team #{tn} is {slot_name or "empty"} in AES, not {name} - refresh and try again')
+        if rank < 1 or rank > len(tas):
+            raise FinishRejected(f'rank {rank} is outside 1-{len(tas)}')
+        if current[tn] is not None and current[tn] != rank and not overwrite:
+            raise FinishRejected(f'{slot_name} already has rank {current[tn]} in AES')
+        final[tn] = rank
+    seen = {}
+    for i, rank in enumerate(final):
+        if rank is None:
+            continue
+        if rank in seen:
+            a = _strip_seed(tas[seen[rank]].get('team') or '') or f'team #{seen[rank]}'
+            b = _strip_seed(tas[i].get('team') or '') or f'team #{i}'
+            raise FinishRejected(f'rank {rank} would be held by both {a} and {b}')
+        seen[rank] = i
+    return kind, play, current, final
+
+
+def _finish_steps(current, final):
+    """The FinishData writes to send. AES assigns ranks slot by slot and throws the
+    moment one slot takes a rank another slot still holds, so a reorder of ranks
+    AES already has (a swap - only possible with `overwrite`) goes out as two
+    writes: first clear every changed slot, then set the final ranks."""
+    state = list(current)
+    for i, rank in enumerate(final):
+        if rank is not None and rank != state[i] and any(r == rank for j, r in enumerate(state) if j != i):
+            cleared = [current[k] if final[k] == current[k] else None for k in range(len(current))]
+            return [cleared, final]
+        state[i] = rank
+    return [final]
+
+
+def _finish_vals(file_id, play_id, ranks):
+    """A FinishData payload as decode_remote_entry would return its values."""
+    return [file_id, REMOTE_FINISH_DATA, str(play_id)] + ['' if r is None else str(r) for r in ranks]
+
+
+def send_finish_ranks(cmd, cout, tournament_data, file_id, bridge_exe):
+    """Encode and send one finish_ranks outbox command into AES as FinishData
+    (33282). Returns (status, detail, vals) like send_score_correction, with vals
+    the final [fileId, '33282', playId, rank per slot] - the caller applies it to
+    the cache and re-pushes the play, since AES won't echo it back to us."""
+    if not bridge_exe:
+        return 'failed', 'AESBridge.exe not available', None
+    if not file_id:
+        return 'failed', 'fileId not yet captured - waiting for first EventUpdate', None
+    try:
+        _kind, _play, current, final = _merge_finish_ranks(cmd, tournament_data)
+    except FinishRejected as e:
+        return 'rejected', str(e), None
+    except LookupError as e:
+        return 'failed', str(e), None
+    except (KeyError, TypeError, ValueError) as e:
+        return 'rejected', f'bad outbox command: {e}', None
+    if final == current:
+        # Already what AES has - nothing to send, but still re-push so the dashboard catches up.
+        return 'applied', 'AES already had these finishes', _finish_vals(file_id, cmd['playId'], final)
+
+    out_path = os.path.join(SCRIPT_DIR, 'finish_data_out.bin')
+    try:
+        for step in _finish_steps(current, final):
+            r = subprocess.run(
+                [bridge_exe, '--encode-finish', out_path, file_id, str(cmd['playId'])]
+                + ['-' if rank is None else str(rank) for rank in step],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode != 0:
+                return 'rejected', r.stderr.strip()[:200], None
+            with open(out_path, 'rb') as f:
+                payload = f.read()
+            cout.send(NCC_OBJECT, CMD_REMOTE_ENTRY_UPDATE, payload)
+        return 'applied', None, _finish_vals(file_id, cmd['playId'], final)
+    except Exception as e:
+        return 'failed', str(e), None
+
+
 def _ack_outbox(base_url, ingest_key, timeout, cmd_id, status, detail, cf_headers=None):
     """POST the apply result back to the dashboard. Runs in a daemon thread,
     like the delta/snapshot pushes."""
@@ -663,6 +813,9 @@ def _pool_payload(p, gold_spots_map=None):
         for ta in p.get('teamAssignments', [])
         if ta.get('team')
     }
+    # teamNumber (AES's 0-based Play._Teams index - FinishData's order) and entrySeed let the dashboard
+    # write finishes back (finish_ranks outbox command, dashboard ADR-016).
+    slot_by_team = {ta.get('team'): ta for ta in p.get('teamAssignments', []) if ta.get('team')}
     teams = []
     for st in standings:
         pts_against = st.get('ptsAgainst', 0)
@@ -678,6 +831,8 @@ def _pool_payload(p, gold_spots_map=None):
             'pointRatio':  ratio,
             'finishRank':  st.get('finishRank'),
             'exitSeed':    exit_seed_by_team.get(raw_name),
+            'teamNumber':  (slot_by_team.get(raw_name) or {}).get('teamNumber'),
+            'entrySeed':   (slot_by_team.get(raw_name) or {}).get('entrySeed'),
         })
     courts = p.get('courts') or []
     first_court = courts[0] if courts else {}
@@ -814,7 +969,9 @@ def _bracket_payload(b):
         # Standings for the dashboard's finalize cards: finishRank stays null
         # until staff finalize the bracket in Scheduler (docs/BRACKET_STANDINGS_PUSH.md).
         'playId':           b.get('bracketId'),
-        'teams':            [{'name': _strip_seed(ta.get('team') or ''), 'finishRank': ta.get('finishRank')}
+        # teamNumber/entrySeed: for writing finishes back (finish_ranks, dashboard ADR-016).
+        'teams':            [{'name': _strip_seed(ta.get('team') or ''), 'finishRank': ta.get('finishRank'),
+                              'teamNumber': ta.get('teamNumber'), 'entrySeed': ta.get('entrySeed')}
                              for ta in (b.get('teamAssignments') or []) if ta.get('team')],
     }
 
@@ -1182,6 +1339,7 @@ def monitor(cfg):
 
     print(f"\n{'═'*62}")
     print(f"  AES Sync Monitor")
+    print(f"  Version:   {BUILD_LABEL}")
     print(f"{'═'*62}")
     print(f"  AES:       {host}:{port}")
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")
@@ -1225,6 +1383,28 @@ def monitor(cfg):
                 except socket.timeout:
                     while allow_writeback and not outbox_q.empty():
                         cmd = outbox_q.get_nowait()
+                        if cmd.get('type') == 'finish_ranks':
+                            status, detail, vals = send_finish_ranks(cmd, cout, prev_data, current_file_id, bridge_exe)
+                            log(f"finish_ranks playId={cmd.get('playId')} -> {status}{f' ({detail})' if detail else ''}")
+                            if status == 'applied' and vals:
+                                # AES won't echo this FinishData back to us - patch the cached
+                                # play (so the next command merges with it) and push the play now
+                                # instead of waiting for the next full update. Then ack.
+                                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                                pool = _apply_finish_data(prev_data, vals)
+                                bracket = None if pool else _apply_bracket_finish_data(prev_data, vals)
+                                if pool and base_url:
+                                    _push_pool_if_changed(pool, prev_data, last_sent_pools, now_utc,
+                                                          base_url, ingest_key, timeout, cf_headers)
+                                elif bracket and base_url:
+                                    _push_bracket_if_changed(bracket, prev_data, last_sent_brackets, now_utc,
+                                                             base_url, ingest_key, timeout, cf_headers)
+                            threading.Thread(
+                                target=_ack_outbox,
+                                args=(base_url, ingest_key, timeout, cmd.get('id'), status, detail, cf_headers),
+                                daemon=True,
+                            ).start()
+                            continue
                         status, detail, entry_obj = send_score_correction(cmd, cout, prev_data, current_file_id, bridge_exe)
                         if status == 'applied' and entry_obj and base_url:
                             # AES won't echo this write-back to us, so push_delta

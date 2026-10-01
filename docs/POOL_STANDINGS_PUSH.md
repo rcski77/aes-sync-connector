@@ -54,7 +54,8 @@ Full server-side docs are in `aes-tourney-director/docs/ingest-api.md` under "`P
 2. **Change detection.** Keep a per-connection dict `last_sent_pools: {playId: signature}`, reset
    alongside `last_snapshot = None` at the top of the reconnect loop. The signature is a stable
    `json.dumps(..., sort_keys=True)` of the fields that matter to standings:
-   `teams` (the whole list: name, matchesWon/Lost, setsWon/Lost, pointRatio, finishRank, exitSeed)
+   `teams` (the whole list: name, matchesWon/Lost, setsWon/Lost, pointRatio, finishRank, exitSeed, and
+   teamNumber/entrySeed for the dashboard's `finish_ranks` write-back — `docs/DASHBOARD_OUTBOX_API.md`)
    plus `goldSpotsCount`. Don't include `date`/`courts`/format fields, or cosmetic churn would trigger pushes.
 
 3. **In the `CMD_EVENT_UPDATE` branch**, after `curr` is parsed and when `curr and base_url`:

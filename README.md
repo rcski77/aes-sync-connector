@@ -37,7 +37,7 @@ Builds everything in one step:
 2. Bundles `aes_monitor.exe` with PyInstaller
 3. Assembles `dist\` with all required files
 
-On first build, `dist\aes_config.ini` is created from the template. Fill in your values before deploying.
+Each build copies the template to `dist\aes_config.ini.example`, never to a live config. Before deploying, add your real config next to it: `aes_config.ini`, or the `connector-config-<eventId>.ini` downloaded from the dashboard.
 
 > **Note:** Requires Python 3.9+ and .NET SDK on PATH. `build.bat` will look for `dotnet` on PATH first, then fall back to `C:\Program Files\dotnet\dotnet.exe`.
 
@@ -58,7 +58,8 @@ aes-sync\
 ├── aes_monitor.exe
 ├── AESBridge.exe
 ├── EventScheduler_Release.exe
-└── aes_config.ini
+├── aes_config.ini.example
+└── aes_config.ini            ← your real config (or connector-config-<eventId>.ini)
 ```
 
 Double-click `aes_monitor.exe` to run. No Python installation required on the target machine.
