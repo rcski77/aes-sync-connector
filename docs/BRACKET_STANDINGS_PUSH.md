@@ -30,8 +30,8 @@ No bridge changes are needed; this is `monitor/aes_monitor.py` only.
   "root": { ... },
   "playId": -50054,
   "teams": [
-    { "name": "Forest Hills Eastern", "finishRank": null },
-    { "name": "Ludington", "finishRank": null }
+    { "name": "Forest Hills Eastern", "finishRank": null, "teamNumber": 0, "entrySeed": 3 },
+    { "name": "Ludington", "finishRank": null, "teamNumber": 1, "entrySeed": 14 }
   ]
 }
 ```
@@ -41,6 +41,9 @@ No bridge changes are needed; this is `monitor/aes_monitor.py` only.
   suffix stripping as pool names) and `finishRank` = `ta['finishRank']`, which is null until finalized.
   Send teams in AES's order. The server ignores blank names and placeholder names like "Winner of Match 1"
   (a slot not filled yet), so you don't need to filter them, though skipping blanks is fine.
+- `teamNumber` (`ta['teamNumber']`, the 0-based `Play._Teams` index, blank slots included) and `entrySeed`
+  (`ta['entrySeed']`) let the dashboard write finishes back as a `finish_ranks` outbox command
+  (`docs/DASHBOARD_OUTBOX_API.md`). Without them its "Set finishes in AES" buttons stay hidden.
 - Both fields are optional server-side. Without **both**, the bracket just gets no finalize notifications.
 
 ### 2. `POST {endpoint}/bracket`: one bracket, when its teams change

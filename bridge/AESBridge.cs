@@ -35,6 +35,11 @@ class AESBridge
             if (args.Length >= 1 && args[0] == "--encode-remote")
                 return EncodeRemoteEntry(args.Skip(1).ToArray());
 
+            // --encode-finish mode: build a FinishData (33282) payload — a play's finish
+            // ranks — for the dashboard's finish_ranks outbox command (ADR-016).
+            if (args.Length >= 1 && args[0] == "--encode-finish")
+                return EncodeFinishData(args.Skip(1).ToArray());
+
             byte[] data;
             if (args.Length > 0 && File.Exists(args[0]))
                 data = File.ReadAllBytes(args[0]);
@@ -229,6 +234,66 @@ class AESBridge
         if (outcome != 0 && a.Length == 6)
             return "outcome is decided (non-Undecided) but no set scores were supplied";
 
+        return null;
+    }
+
+    // ── Finish ranks encoder ───────────────────────────────────────────────────
+    // Builds a RemoteEntryUpdateAttached FinishData payload: [fileId, "33282", playId,
+    // rank per team in Play._Teams order], the same shape as AES's own
+    // Play.GetFinishRankSerialization(), where an unranked slot is "" (int?.ToString()).
+    // SchedulerFile.UpdateWithRemoteEntryData ignores the update unless there is one
+    // value per team slot, and assigns FinishRank slot by slot; the setter throws
+    // (on AES's network thread) on a rank above the team count or a rank another
+    // team in the play already holds. The count and duplicates are checked here;
+    // the monitor merges with the play's current ranks and orders writes so a
+    // one-by-one assignment never collides (see send_finish_ranks).
+
+    static int EncodeFinishData(string[] a)
+    {
+        // a[0]=outFile a[1]=fileId a[2]=playId a[3..]=one rank per team slot ("-" = no rank)
+        string err = ValidateFinishArgs(a);
+        if (err != null) { Console.Error.WriteLine($"Error: {err}"); return 1; }
+
+        int slots = a.Length - 3;
+        var arr = new string[3 + slots];
+        arr[0] = a[1];       // FileID GUID, as-is
+        arr[1] = "33282";    // RemoteEntryUpdateType.FinishData — hardcoded, never caller-supplied
+        arr[2] = a[2];
+        for (int i = 0; i < slots; i++) arr[3 + i] = a[3 + i] == "-" ? "" : a[3 + i];
+
+        try
+        {
+#pragma warning disable SYSLIB0011
+            using var ms = new MemoryStream();
+            new BinaryFormatter().Serialize(ms, arr);
+            File.WriteAllBytes(a[0], ms.ToArray());
+#pragma warning restore SYSLIB0011
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+        return 0;
+    }
+
+    static string ValidateFinishArgs(string[] a)
+    {
+        if (a.Length < 4)
+            return "usage: --encode-finish <outFile> <fileId> <playId> <rank|-> [<rank|-> ...] (one per team slot)";
+        if (!Guid.TryParse(a[1], out _)) return $"fileId is not a valid GUID: {a[1]}";
+        if (!int.TryParse(a[2], out _)) return $"playId is not an integer: {a[2]}";
+
+        int slots = a.Length - 3;
+        var seen = new HashSet<int>();
+        for (int i = 3; i < a.Length; i++)
+        {
+            if (a[i] == "-") continue;
+            if (!int.TryParse(a[i], out int rank) || rank < 1 || rank > slots)
+                return $"rank must be an integer 1-{slots} or '-': {a[i]}";
+            if (!seen.Add(rank))
+                return $"rank {rank} is given to more than one team";
+        }
         return null;
     }
 

@@ -385,6 +385,8 @@ Full tournament state — dashboard upserts everything and deletes absences.
       "setsWon": 6, "setsLost": 1,
       "pointRatio": 1.42,   // ptsFor/ptsAgainst, null if no points against
       "finishRank": 1,      // AES's real finish rank, nullable — display value only, does not drive array order
+      "teamNumber": 2,      // AES's 0-based Play._Teams index (FinishData order) — for finish_ranks write-back
+      "entrySeed": 17,      // the team's entry seed into this pool, nullable
       "exitSeed": null      // AES's real exit seed, nullable — set only once a human has confirmed
                              // the pool's final standings in Scheduler (or, in practice, tracks
                              // finishRank 1:1 outside of reseeded plays); dashboard uses a pool
@@ -411,7 +413,8 @@ Full tournament state — dashboard upserts everything and deletes absences.
     },
     "playId": -50054,                 // Bracket PlayID (bridge bracketId) — same value its matches carry
     "teams": [                        // Play.Teams order; blank slots skipped, seed suffix stripped
-      { "name": "Forest Hills Eastern", "finishRank": null }  // null until staff finalize in Scheduler
+      { "name": "Forest Hills Eastern", "finishRank": null,  // null until staff finalize in Scheduler
+        "teamNumber": 0, "entrySeed": 3 }  // Play._Teams index + seed, for finish_ranks write-back
     ]
   }]
 }
@@ -485,6 +488,21 @@ sent (discriminator `33281` reinserted at index 1) and returning it as
 `entry_obj`; the main loop calls `push_delta(entry_obj, ...)` on `'applied'`
 right after the send, so the dashboard doesn't have to wait out the ~3-minute
 snapshot interval to see its own correction reflected.
+
+### Finish ranks write-back (`finish_ranks`)
+
+`AESBridge.exe --encode-finish <outFile> <fileIdGuid> <playId> <rank|-> ...` (one
+value per team slot in `Play._Teams` order, `-` = no rank) builds a `FinishData`
+(33282) payload — `[fileId, "33282", playId, rank per slot]`, exactly
+`Play.GetFinishRankSerialization()`'s shape, with an unranked slot as `""`. The
+bridge checks the rank range and duplicates; `SchedulerFile.UpdateWithRemoteEntryData`
+ignores the update unless there's one value per slot and throws on a duplicate
+rank part-way through. `send_finish_ranks()` in the monitor merges the command
+with the cached play's current ranks (`_merge_finish_ranks`), rejects clashes and
+non-`overwrite` changes, splits a reorder of existing ranks into clear-then-set
+(`_finish_steps`), then the main loop patches the cache (`_apply_finish_data` /
+`_apply_bracket_finish_data`) and re-pushes `/pool` or `/bracket` before acking.
+Contract: `docs/DASHBOARD_OUTBOX_API.md`. Not yet verified against a live AES.
 
 **Verified against a real running AES test instance (2026-07-10):** a write
 applies, work-team fields survive an outcome/score-only correction unchanged
