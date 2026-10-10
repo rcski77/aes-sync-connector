@@ -602,9 +602,12 @@ def _strip_seed(name):
 def _server_safe_key(event_id, manual_addition, event_name):
     """Derive AES's web API event ID string (e.g. 'PTAwMDAwNDUwMzE90') from the
     numeric eventId. Verified against gavin-aes-scripts sample data:
-    eventId 45031, manual_addition=False -> 'PTAwMDAwNDUwMzE90'."""
+    eventId 45031, manual_addition=False -> 'PTAwMDAwNDUwMzE90'.
+    Manually added events encode the name with every non-alphanumeric character
+    replaced by '_' (not dropped): '2026 Shoreline Showdown - JV & Freshman' ->
+    'MjAyNl9TaG9yZWxpbmVfU2hvd2Rvd25fX19KVl9fX0ZyZXNobWFu0', matching AES."""
     if manual_addition:
-        token = ''.join(ch for ch in (event_name or '') if ch.isalnum())
+        token = ''.join(ch if ch.isalnum() else '_' for ch in (event_name or ''))
     else:
         token = f'={event_id:010d}='
     data = token.encode('utf-8')

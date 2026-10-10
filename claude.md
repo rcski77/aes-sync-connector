@@ -436,7 +436,8 @@ if zoneinfo is unavailable.
 
 **aesEventIdKey derivation:** AES's web API event ID string isn't stored in the local
 SchedulerFile binary — it's derived from the numeric `eventId` (or, for manually-added
-events, from the event name) via a deterministic encoding: zero-pad the ID into
+events, from the event name with every non-alphanumeric character replaced by `_`, e.g.
+`2026 Shoreline Showdown - JV & Freshman` -> `2026_Shoreline_Showdown___JV___Freshman`) via a deterministic encoding: zero-pad the ID into
 `"=0000033281="`, base64-encode it, strip `=` padding, substitute `+`→`-`/`/`→`_` for
 URL-safety, then append one length-checksum character (`chr(48 + fullBase64Len - trimmedLen)`).
 Implemented as `_server_safe_key()` in `monitor/aes_monitor.py`, ported from an independent
