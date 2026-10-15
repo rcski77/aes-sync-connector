@@ -239,6 +239,7 @@ the monitor transforms it into the ingest API payload shape before POSTing.
   "matches": [{
     "matchId", "courtId", "courtName", "startTime", "endTime", "matchLength",
     "team1", "team2", "workTeam",   // workTeam is null if not assigned
+    "team1Code", "team2Code",       // AES team code per side, null while the side is a slot (see "Team codes")
     "divisionCode", "divisionName", "playId", "playName",
     // playId is the pool's or bracket's PlayID — for playType "playoff" (a pool's
     // own internal tiebreaker bracket), this is the OWNING POOL's PlayID, not the
@@ -326,6 +327,8 @@ through (signals a score was cleared). Single match only.
     "endTime":   "2025-06-28T13:30:00",
     "team1": "Sky High 17 Elite",          // seed suffix stripped
     "team2": "COLAVOL 17 Black",
+    "team1Code": "g17skyhi1sc",            // AES team code, null while the side is a slot ("Winner of ...");
+    "team2Code": null,                     // both omitted only when the match isn't in the cached snapshot
     "workTeam": "414 - 17 Outlaws",        // null if not assigned
     "hasResult": true,
     "outcome": "FirstTeamWon",
@@ -391,6 +394,7 @@ Full tournament state — dashboard upserts everything and deletes absences.
       "finishRank": 1,      // AES's real finish rank, nullable — display value only, does not drive array order
       "teamNumber": 2,      // AES's 0-based Play._Teams index (FinishData order) — for finish_ranks write-back
       "entrySeed": 17,      // the team's entry seed into this pool, nullable
+      "teamCode": "g17skyhi1sc",  // AES team code, null for a slot ("Pending Reseed", "1st-R1A") — see "Team codes"
       "exitSeed": null      // AES's real exit seed, nullable — set only once a human has confirmed
                              // the pool's final standings in Scheduler (or, in practice, tracks
                              // finishRank 1:1 outside of reseeded plays); dashboard uses a pool
@@ -418,11 +422,32 @@ Full tournament state — dashboard upserts everything and deletes absences.
     "playId": -50054,                 // Bracket PlayID (bridge bracketId) — same value its matches carry
     "teams": [                        // Play.Teams order; blank slots skipped, seed suffix stripped
       { "name": "Forest Hills Eastern", "finishRank": null,  // null until staff finalize in Scheduler
-        "teamNumber": 0, "entrySeed": 3 }  // Play._Teams index + seed, for finish_ranks write-back
+        "teamNumber": 0, "entrySeed": 3,   // Play._Teams index + seed, for finish_ranks write-back
+        "teamCode": "g15fhe1lk" }          // AES team code, null for a slot
+    ]
+  }],
+  "divisions": [{                     // one per AES division: Division.FinalPlaces, the final standings
+    "division": "15 Classic",         // as the director designed them in the scheduler. Same string as
+    "divisionId": 148497,             // matches[]/pools[].division; divisionId = EventDivisionAssignmentID
+    "finalPlaces": [                  // absoluteRank order
+      { "absoluteRank": 3, "overallRank": 3,   // overallRank is tie-aware: both semifinal losers 3
+        "groupName": "", "groupRank": 3, "seed": 3,
+        "team": "Loser of R3 EliteChampM4",    // the team (seedless, like every other name) once
+        "teamCode": null }                     // resolved, else AES's slot text; teamCode null = slot
     ]
   }]
 }
 ```
+
+**Team codes:** every roster entry, match side and final place carries `teamCode`
+(`team1Code`/`team2Code` on matches): the team's AES `Team.Code` once AES has assigned a team
+(`DivisionTeamAssignment` set — the same test AES's own `Division.IsFinished` uses), **null** while
+it's still a slot. Slot text can't be told from team names by pattern ("1st Alliance 15 Gold" is a
+real club), so the dashboard reads null as "slot" and a missing field as "older connector". A
+resolved team never sends null and no two teams share a code: a blank Code (hand-added teams) or one
+that isn't a real code (AES's import writes "Invalid USAV Region" into Code for every team whose
+region it can't match — 17 teams at 2025 AAU Wave 3) sends `gaggle:<GaggleID>`, AES's own team ID,
+instead. See `TeamCode()` in bridge/AESBridge.cs.
 Bracket entries are built from AESBridge's own `brackets[]` field in `tournament_data.json`
 (already walks `Bracket.PlotMatchPositions()` — no bridge changes needed for this). The monitor
 skips pool-owned tiebreaker brackets (`isPlayoff` — see `IsFromPlayoffBracket` above, these

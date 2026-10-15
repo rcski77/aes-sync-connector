@@ -589,6 +589,9 @@ def _match_payload(m):
         'endTime':   _eastern_naive(m.get('endTime', '')),
         'team1':     m.get('team1', ''),
         'team2':     m.get('team2', ''),
+        # AES team code per side, null while the side is still a slot ("Winner of ...").
+        'team1Code': m.get('team1Code'),
+        'team2Code': m.get('team2Code'),
         'workTeam':  m.get('workTeam') or None,
         'hasResult': bool(m.get('decided')),
         'sets':      [{'ft': s['team1'], 'st': s['team2']} for s in m.get('sets', [])],
@@ -836,6 +839,8 @@ def _pool_payload(p, gold_spots_map=None):
             'exitSeed':    exit_seed_by_team.get(raw_name),
             'teamNumber':  (slot_by_team.get(raw_name) or {}).get('teamNumber'),
             'entrySeed':   (slot_by_team.get(raw_name) or {}).get('entrySeed'),
+            # AES team code, null for a slot ("Pending Reseed (92)") - always sent, never omitted.
+            'teamCode':    (slot_by_team.get(raw_name) or {}).get('teamCode'),
         })
     courts = p.get('courts') or []
     first_court = courts[0] if courts else {}
@@ -916,6 +921,10 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_hea
             'outcome':   outcome_map.get(outcome_code, 'Undecided'),
         },
     }
+    if match_info:
+        # Only with the match found: a null code means "slot" to the dashboard, an omitted one "unknown".
+        payload['match']['team1Code'] = match_info.get('team1Code')
+        payload['match']['team2Code'] = match_info.get('team2Code')
     url = base_url.rstrip('/') + '/delta'
     # print(f"\n  ── Delta payload ──\n{json.dumps(payload, indent=2)}\n")
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'delta', cf_headers), daemon=True).start()
@@ -974,8 +983,28 @@ def _bracket_payload(b):
         'playId':           b.get('bracketId'),
         # teamNumber/entrySeed: for writing finishes back (finish_ranks, dashboard ADR-016).
         'teams':            [{'name': _strip_seed(ta.get('team') or ''), 'finishRank': ta.get('finishRank'),
-                              'teamNumber': ta.get('teamNumber'), 'entrySeed': ta.get('entrySeed')}
+                              'teamNumber': ta.get('teamNumber'), 'entrySeed': ta.get('entrySeed'),
+                              'teamCode': ta.get('teamCode')}
                              for ta in (b.get('teamAssignments') or []) if ta.get('team')],
+    }
+
+
+def _division_payload(d):
+    """Map a tournament_data.json division to the ingest API divisions[] shape: AES's
+    Division.FinalPlaces, the division's final standings as designed in the scheduler.
+    `division` is the same DescriptionAlias string matches[]/pools[] send."""
+    return {
+        'division':    d.get('divisionName', ''),
+        'divisionId':  d.get('divisionId'),
+        'finalPlaces': [{
+            'absoluteRank': fp.get('absoluteRank'),
+            'overallRank':  fp.get('overallRank'),
+            'groupName':    fp.get('groupName') or '',
+            'groupRank':    fp.get('groupRank'),
+            'seed':         fp.get('seed'),
+            'team':         fp.get('team') or '',
+            'teamCode':     fp.get('teamCode'),  # null while the place is still a slot
+        } for fp in sorted(d.get('finalPlaces') or [], key=lambda fp: fp.get('absoluteRank') or 0)],
     }
 
 
@@ -1022,6 +1051,7 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
         'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
         'pools':         pools,
         'brackets':      brackets,
+        'divisions':     [_division_payload(d) for d in tournament_data.get('divisions', [])],
     }
     url = base_url.rstrip('/') + '/snapshot'
     threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot', cf_headers), daemon=True).start()

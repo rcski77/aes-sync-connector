@@ -17,6 +17,7 @@ class AESBridge
 {
     // Court name → ID lookup built once from sf.Courts
     static Dictionary<string, int> _courtIdByName;
+    static HashSet<string> _sharedTeamCodes = new HashSet<string>();
 
     static int Main(string[] args)
     {
@@ -60,6 +61,18 @@ class AESBridge
                 c => c.Name ?? "",
                 c => c.CourtID,
                 StringComparer.OrdinalIgnoreCase);
+
+            // Team codes more than one team carries (see TeamCode)
+            try
+            {
+                _sharedTeamCodes = new HashSet<string>(sf.Teams
+                    .Select(t => (t.Code ?? "").Trim())
+                    .Where(c => c != "")
+                    .GroupBy(c => c, StringComparer.OrdinalIgnoreCase)
+                    .Where(g => g.Count() > 1)
+                    .Select(g => g.Key), StringComparer.OrdinalIgnoreCase);
+            }
+            catch { }
 
             string json = ToJson(sf);
 
@@ -318,6 +331,32 @@ class AESBridge
     static string T1(Match m) => TeamName(m.FirstTeam, () => m.FirstTeamText);
     static string T2(Match m) => TeamName(m.SecondTeam, () => m.SecondTeamText);
 
+    // ── Team codes ─────────────────────────────────────────────────────────────
+    // AES tells a team from a slot by DivisionTeamAssignment being set (Division.IsFinished uses the same
+    // test); slot text alone can't ("Pending Reseed (92)" vs a real club named "1st Alliance"). So every
+    // roster entry, match side and final place carries the team's Team.Code, or null while it's a slot.
+    // A resolved team never gets null, and no two teams share a code: when Code is blank (a hand-added team)
+    // or not a real code (AES's import writes "Invalid USAV Region" into Code for every team whose region it
+    // can't match, so 17 teams shared it at 2025 AAU Wave 3), the team sends "gaggle:<GaggleID>", AES's own
+    // team ID, instead.
+
+    static string TeamCode(Team team)
+    {
+        if (team == null) return null;
+        try
+        {
+            string code = (team.Code ?? "").Trim();
+            if (code != "" && !code.Any(char.IsWhiteSpace) && !_sharedTeamCodes.Contains(code)) return code;
+            return $"gaggle:{team.GaggleID}";
+        }
+        catch { return null; }
+    }
+
+    static string TeamCode(Play.TeamAssignment ta)
+    {
+        try { return TeamCode(ta?.DivisionTeamAssignment?.Team); } catch { return null; }
+    }
+
     // ── Reflection helpers ─────────────────────────────────────────────────
     // Used for properties that are public in source but internal in the binary,
     // or where the decompiler showed a different name than the compiled assembly.
@@ -469,6 +508,8 @@ class AESBridge
         sb.Append($"\"matchLength\":  {m.MatchLength}, ");
         sb.Append($"\"team1\":        {S(T1(m))}, ");
         sb.Append($"\"team2\":        {S(T2(m))}, ");
+        sb.Append($"\"team1Code\":    {S(TeamCode(m.FirstTeam))}, ");
+        sb.Append($"\"team2Code\":    {S(TeamCode(m.SecondTeam))}, ");
         sb.Append($"\"workTeam\":     {S(TeamName(m.WorkTeam, () => m.WorkTeamText))}, ");
         sb.Append($"\"workTeamNumber\": {m.WorkTeamNumber}, ");
         sb.Append($"\"typeOfWorkTeam\": {S(m.TypeOfWorkTeam.ToString())}, ");
@@ -776,6 +817,7 @@ class AESBridge
         sb.Append($"\"finishRank\": {N(ta.FinishRank)}, ");
         sb.Append($"\"reseedSeed\": {N(ta.ReseedSeed)}, ");
         sb.Append($"\"exitSeed\":   {N(ta.ExitSeed)}, ");
+        sb.Append($"\"teamCode\":   {S(TeamCode(ta))}, ");
         sb.Append($"\"team\":       {S(team)}");
         sb.Append("}");
         return sb.ToString();
@@ -786,19 +828,25 @@ class AESBridge
     // entries. Count of entries where GroupName == "Gold" is the gold-bracket
     // advancement count — see WRITE_BACK_EDITOR_SCOPING.md for context.
 
+    // A resolved place's team is named the same way as everywhere else (TeamName: no seed suffix, which
+    // FinalPlace.TeamText adds under the Seed Display Setting); a slot keeps AES's TeamText ("Winner of ...").
+
     static string DivisionJson(Division div)
     {
         var sb = new StringBuilder("{");
         sb.Append($"\"divisionCode\": {S(div.CodeAlias)}, ");
         sb.Append($"\"divisionName\": {S(div.DescriptionAlias)}, ");
+        sb.Append($"\"divisionId\":   {div.EventDivisionAssignmentID}, ");
         sb.Append("\"finalPlaces\": [");
         var finalPlaces = div.FinalPlaces;
         for (int i = 0; i < finalPlaces.Length; i++)
         {
             if (i > 0) sb.Append(", ");
             var fp = finalPlaces[i];
+            Team resolved = null;
+            try { resolved = fp.DivisionTeamAssignment?.Team; } catch { }
             string team = "";
-            try { team = fp.TeamText; } catch { }
+            try { team = resolved != null ? resolved.GetTeamText(true, false) : fp.TeamText; } catch { }
 
             sb.Append("{");
             sb.Append($"\"absoluteRank\": {fp.AbsoluteRank}, ");
@@ -806,6 +854,7 @@ class AESBridge
             sb.Append($"\"groupRank\":    {fp.GroupRank}, ");
             sb.Append($"\"overallRank\":  {fp.OverallRank}, ");
             sb.Append($"\"seed\":         {N(fp.Seed)}, ");
+            sb.Append($"\"teamCode\":     {S(TeamCode(resolved))}, ");
             sb.Append($"\"team\":         {S(team)}");
             sb.Append("}");
         }
