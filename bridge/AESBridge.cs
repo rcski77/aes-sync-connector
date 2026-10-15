@@ -357,6 +357,15 @@ class AESBridge
         try { return TeamCode(ta?.DivisionTeamAssignment?.Team); } catch { return null; }
     }
 
+    // The team's club (Team.Club.Name) and its region abbreviation (Club.RegionAbbr, e.g. "GL"), for the
+    // public results site's clubs list. Null for a slot, a team with no club, or a blank value.
+    static Club TeamClub(Play.TeamAssignment ta)
+    {
+        try { return ta?.DivisionTeamAssignment?.Team?.Club; } catch { return null; }
+    }
+
+    static string Blank2Null(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
     // ── Reflection helpers ─────────────────────────────────────────────────
     // Used for properties that are public in source but internal in the binary,
     // or where the decompiler showed a different name than the compiled assembly.
@@ -818,6 +827,9 @@ class AESBridge
         sb.Append($"\"reseedSeed\": {N(ta.ReseedSeed)}, ");
         sb.Append($"\"exitSeed\":   {N(ta.ExitSeed)}, ");
         sb.Append($"\"teamCode\":   {S(TeamCode(ta))}, ");
+        var club = TeamClub(ta);
+        sb.Append($"\"club\":       {S(Blank2Null(club?.Name))}, ");
+        sb.Append($"\"clubRegion\": {S(Blank2Null(club?.RegionAbbr))}, ");
         sb.Append($"\"team\":       {S(team)}");
         sb.Append("}");
         return sb.ToString();

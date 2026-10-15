@@ -395,6 +395,8 @@ Full tournament state — dashboard upserts everything and deletes absences.
       "teamNumber": 2,      // AES's 0-based Play._Teams index (FinishData order) — for finish_ranks write-back
       "entrySeed": 17,      // the team's entry seed into this pool, nullable
       "teamCode": "g17skyhi1sc",  // AES team code, null for a slot ("Pending Reseed", "1st-R1A") — see "Team codes"
+      "club": "Sky High Volleyball",  // Team.Club.Name, null for a slot or a team with no club
+      "clubRegion": "SC",   // Club.RegionAbbr, null for a slot, no club, or a club that never chose a region
       "exitSeed": null      // AES's real exit seed, nullable — set only once a human has confirmed
                              // the pool's final standings in Scheduler (or, in practice, tracks
                              // finishRank 1:1 outside of reseeded plays); dashboard uses a pool
@@ -423,7 +425,8 @@ Full tournament state — dashboard upserts everything and deletes absences.
     "teams": [                        // Play.Teams order; blank slots skipped, seed suffix stripped
       { "name": "Forest Hills Eastern", "finishRank": null,  // null until staff finalize in Scheduler
         "teamNumber": 0, "entrySeed": 3,   // Play._Teams index + seed, for finish_ranks write-back
-        "teamCode": "g15fhe1lk" }          // AES team code, null for a slot
+        "teamCode": "g15fhe1lk",           // AES team code, null for a slot
+        "club": "Forest Hills VBC", "clubRegion": "LK" }  // same as a pool team's
     ]
   }],
   "divisions": [{                     // one per AES division: Division.FinalPlaces, the final standings
