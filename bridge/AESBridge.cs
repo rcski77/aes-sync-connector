@@ -336,9 +336,9 @@ class AESBridge
     // test); slot text alone can't ("Pending Reseed (92)" vs a real club named "1st Alliance"). So every
     // roster entry, match side and final place carries the team's Team.Code, or null while it's a slot.
     // A resolved team never gets null, and no two teams share a code: when Code is blank (a hand-added team)
-    // or not a real code (AES's import writes "Invalid USAV Region" into Code for every team whose region it
-    // can't match, so 17 teams shared it at 2025 AAU Wave 3), the team sends "gaggle:<GaggleID>", AES's own
-    // team ID, instead.
+    // or not a real code (a club that never chose a region on AES gets no USAV team codes, and AES puts
+    // "Invalid USAV Region" in Code instead: 17 teams shared it at 2025 AAU Wave 3), the team sends
+    // "gaggle:<GaggleID>", AES's own team ID, instead.
 
     static string TeamCode(Team team)
     {

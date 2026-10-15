@@ -445,8 +445,9 @@ Full tournament state — dashboard upserts everything and deletes absences.
 it's still a slot. Slot text can't be told from team names by pattern ("1st Alliance 15 Gold" is a
 real club), so the dashboard reads null as "slot" and a missing field as "older connector". A
 resolved team never sends null and no two teams share a code: a blank Code (hand-added teams) or one
-that isn't a real code (AES's import writes "Invalid USAV Region" into Code for every team whose
-region it can't match — 17 teams at 2025 AAU Wave 3) sends `gaggle:<GaggleID>`, AES's own team ID,
+that isn't a real code (a club that never chose a region on AES gets no USAV team codes, so AES puts
+"Invalid USAV Region" in Code for all its teams — 17 teams at 2025 AAU Wave 3) sends
+`gaggle:<GaggleID>`, AES's own team ID,
 instead. See `TeamCode()` in bridge/AESBridge.cs.
 Bracket entries are built from AESBridge's own `brackets[]` field in `tournament_data.json`
 (already walks `Bracket.PlotMatchPositions()` — no bridge changes needed for this). The monitor
