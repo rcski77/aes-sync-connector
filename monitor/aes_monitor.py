@@ -841,6 +841,9 @@ def _pool_payload(p, gold_spots_map=None):
             'entrySeed':   (slot_by_team.get(raw_name) or {}).get('entrySeed'),
             # AES team code, null for a slot ("Pending Reseed (92)") - always sent, never omitted.
             'teamCode':    (slot_by_team.get(raw_name) or {}).get('teamCode'),
+            # The team's club + region abbreviation (public results clubs list), null for a slot or no club.
+            'club':        (slot_by_team.get(raw_name) or {}).get('club'),
+            'clubRegion':  (slot_by_team.get(raw_name) or {}).get('clubRegion'),
         })
     courts = p.get('courts') or []
     first_court = courts[0] if courts else {}
@@ -984,7 +987,8 @@ def _bracket_payload(b):
         # teamNumber/entrySeed: for writing finishes back (finish_ranks, dashboard ADR-016).
         'teams':            [{'name': _strip_seed(ta.get('team') or ''), 'finishRank': ta.get('finishRank'),
                               'teamNumber': ta.get('teamNumber'), 'entrySeed': ta.get('entrySeed'),
-                              'teamCode': ta.get('teamCode')}
+                              'teamCode': ta.get('teamCode'),
+                              'club': ta.get('club'), 'clubRegion': ta.get('clubRegion')}
                              for ta in (b.get('teamAssignments') or []) if ta.get('team')],
     }
 

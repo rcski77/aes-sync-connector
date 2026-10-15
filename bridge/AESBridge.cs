@@ -336,9 +336,9 @@ class AESBridge
     // test); slot text alone can't ("Pending Reseed (92)" vs a real club named "1st Alliance"). So every
     // roster entry, match side and final place carries the team's Team.Code, or null while it's a slot.
     // A resolved team never gets null, and no two teams share a code: when Code is blank (a hand-added team)
-    // or not a real code (AES's import writes "Invalid USAV Region" into Code for every team whose region it
-    // can't match, so 17 teams shared it at 2025 AAU Wave 3), the team sends "gaggle:<GaggleID>", AES's own
-    // team ID, instead.
+    // or not a real code (a club that never chose a region on AES gets no USAV team codes, and AES puts
+    // "Invalid USAV Region" in Code instead: 17 teams shared it at 2025 AAU Wave 3), the team sends
+    // "gaggle:<GaggleID>", AES's own team ID, instead.
 
     static string TeamCode(Team team)
     {
@@ -356,6 +356,15 @@ class AESBridge
     {
         try { return TeamCode(ta?.DivisionTeamAssignment?.Team); } catch { return null; }
     }
+
+    // The team's club (Team.Club.Name) and its region abbreviation (Club.RegionAbbr, e.g. "GL"), for the
+    // public results site's clubs list. Null for a slot, a team with no club, or a blank value.
+    static Club TeamClub(Play.TeamAssignment ta)
+    {
+        try { return ta?.DivisionTeamAssignment?.Team?.Club; } catch { return null; }
+    }
+
+    static string Blank2Null(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     // ── Reflection helpers ─────────────────────────────────────────────────
     // Used for properties that are public in source but internal in the binary,
@@ -818,6 +827,9 @@ class AESBridge
         sb.Append($"\"reseedSeed\": {N(ta.ReseedSeed)}, ");
         sb.Append($"\"exitSeed\":   {N(ta.ExitSeed)}, ");
         sb.Append($"\"teamCode\":   {S(TeamCode(ta))}, ");
+        var club = TeamClub(ta);
+        sb.Append($"\"club\":       {S(Blank2Null(club?.Name))}, ");
+        sb.Append($"\"clubRegion\": {S(Blank2Null(club?.RegionAbbr))}, ");
         sb.Append($"\"team\":       {S(team)}");
         sb.Append("}");
         return sb.ToString();
