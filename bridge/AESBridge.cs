@@ -830,9 +830,44 @@ class AESBridge
         var club = TeamClub(ta);
         sb.Append($"\"club\":       {S(Blank2Null(club?.Name))}, ");
         sb.Append($"\"clubRegion\": {S(Blank2Null(club?.RegionAbbr))}, ");
+        AppendNextMatchFields(sb, ta);
         sb.Append($"\"team\":       {S(team)}");
         sb.Append("}");
         return sb.ToString();
+    }
+
+    // Where this slot's finishing position goes next, as AES's own pool sheet prints it ("Future Matches,
+    // based on how you finish your current schedule", PoolSheetReportControl iterating Play.SortedTeams).
+    // A slot stands for the finishing position equal to its entry-seed rank (EntrySeedRank), not for the
+    // team in it: NextCompetingMatch / NextWorkTeamMatch / NextPendingReseed already look up whichever
+    // team holds that position (FinishRank == EntrySeedRank) and fall back to the entry seed before
+    // finishes are set. positionExitSeed is that position's seed into the next round, the entry seed of the
+    // slot it fills there (the dashboard pairs a placeholder with its source by it); null while a reseed
+    // is pending. Not `exitSeed`, which stays the team's own (the dashboard's "pool finalized" signal).
+    // All five are always sent, null (false) where AES has none: the last play has no next match.
+    static void AppendNextMatchFields(StringBuilder sb, Play.TeamAssignment ta)
+    {
+        int? position = null, positionExitSeed = null, nextMatchId = null, nextWorkMatchId = null;
+        bool pendingReseed = false;
+        try { position = ta.EntrySeedRank; } catch { }
+        try { nextMatchId = ta.NextCompetingMatch?.MatchID; } catch { }
+        try { nextWorkMatchId = ta.NextWorkTeamMatch?.MatchID; } catch { }
+        try { pendingReseed = ta.NextPendingReseed; } catch { }
+        try
+        {
+            if (position.HasValue)
+            {
+                var holder = ta.OwningPlay.Teams.FirstOrDefault(t => t.FinishRank == position);
+                if (holder != null) positionExitSeed = holder.ExitSeed;
+                else if (!ta.RankWillBeReseeded) positionExitSeed = ta.EntrySeed;
+            }
+        }
+        catch { }
+        sb.Append($"\"position\":         {N(position)}, ");
+        sb.Append($"\"positionExitSeed\": {N(positionExitSeed)}, ");
+        sb.Append($"\"nextMatchId\":      {N(nextMatchId)}, ");
+        sb.Append($"\"nextWorkMatchId\":  {N(nextWorkMatchId)}, ");
+        sb.Append($"\"nextPendingReseed\": {B(pendingReseed)}, ");
     }
 
     // ── Division ───────────────────────────────────────────────────────────

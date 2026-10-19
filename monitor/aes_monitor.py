@@ -807,6 +807,19 @@ def _compute_gold_spots(tournament_data):
     return result
 
 
+def _next_match_fields(ta):
+    """The finishing position a pool/bracket slot stands for (its entry-seed rank) and where that position
+    plays and works next, AES's own pool-sheet "Future Matches" (bridge AppendNextMatchFields). Always
+    sent, null (False) where AES has none; positionExitSeed is the position's seed into the next round."""
+    return {
+        'position':          ta.get('position'),
+        'positionExitSeed':  ta.get('positionExitSeed'),
+        'nextMatchId':       ta.get('nextMatchId'),
+        'nextWorkMatchId':   ta.get('nextWorkMatchId'),
+        'nextPendingReseed': bool(ta.get('nextPendingReseed')),
+    }
+
+
 def _pool_payload(p, gold_spots_map=None):
     """Map a tournament_data.json pool dict to the ingest API pool shape."""
     standings = p.get('standings', [])
@@ -844,6 +857,7 @@ def _pool_payload(p, gold_spots_map=None):
             # The team's club + region abbreviation (public results clubs list), null for a slot or no club.
             'club':        (slot_by_team.get(raw_name) or {}).get('club'),
             'clubRegion':  (slot_by_team.get(raw_name) or {}).get('clubRegion'),
+            **_next_match_fields(slot_by_team.get(raw_name) or {}),
         })
     courts = p.get('courts') or []
     first_court = courts[0] if courts else {}
@@ -988,7 +1002,8 @@ def _bracket_payload(b):
         'teams':            [{'name': _strip_seed(ta.get('team') or ''), 'finishRank': ta.get('finishRank'),
                               'teamNumber': ta.get('teamNumber'), 'entrySeed': ta.get('entrySeed'),
                               'teamCode': ta.get('teamCode'),
-                              'club': ta.get('club'), 'clubRegion': ta.get('clubRegion')}
+                              'club': ta.get('club'), 'clubRegion': ta.get('clubRegion'),
+                              **_next_match_fields(ta)}
                              for ta in (b.get('teamAssignments') or []) if ta.get('team')],
     }
 

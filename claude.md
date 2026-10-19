@@ -397,6 +397,11 @@ Full tournament state — dashboard upserts everything and deletes absences.
       "teamCode": "g17skyhi1sc",  // AES team code, null for a slot ("Pending Reseed", "1st-R1A") — see "Team codes"
       "club": "Sky High Volleyball",  // Team.Club.Name, null for a slot or a team with no club
       "clubRegion": "SC",   // Club.RegionAbbr, null for a slot, no club, or a club that never chose a region
+      "position": 2,             // the finishing position this slot stands for (EntrySeedRank) — see "Next match"
+      "positionExitSeed": 7,     // that position's seed into the next round, null while a reseed is pending
+      "nextMatchId": -51234,     // that position's next match (NextCompetingMatch), null = no future match
+      "nextWorkMatchId": -51230, // its next work assignment (NextWorkTeamMatch), null = none
+      "nextPendingReseed": false, // true = AES's pool sheet says "Pending Reseed" for this position
       "exitSeed": null      // AES's real exit seed, nullable — set only once a human has confirmed
                              // the pool's final standings in Scheduler (or, in practice, tracks
                              // finishRank 1:1 outside of reseeded plays); dashboard uses a pool
@@ -426,7 +431,9 @@ Full tournament state — dashboard upserts everything and deletes absences.
       { "name": "Forest Hills Eastern", "finishRank": null,  // null until staff finalize in Scheduler
         "teamNumber": 0, "entrySeed": 3,   // Play._Teams index + seed, for finish_ranks write-back
         "teamCode": "g15fhe1lk",           // AES team code, null for a slot
-        "club": "Forest Hills VBC", "clubRegion": "LK" }  // same as a pool team's
+        "club": "Forest Hills VBC", "clubRegion": "LK",   // same as a pool team's
+        "position": 3, "positionExitSeed": 3,             // the five next-match fields, same as a pool team's
+        "nextMatchId": null, "nextWorkMatchId": null, "nextPendingReseed": false }
     ]
   }],
   "divisions": [{                     // one per AES division: Division.FinalPlaces, the final standings
@@ -452,6 +459,19 @@ that isn't a real code (a club that never chose a region on AES gets no USAV tea
 "Invalid USAV Region" in Code for all its teams — 17 teams at 2025 AAU Wave 3) sends
 `gaggle:<GaggleID>`, AES's own team ID,
 instead. See `TeamCode()` in bridge/AESBridge.cs.
+
+**Next match (position fields):** every pool and bracket roster entry also carries the five fields AES's
+own pool sheet uses for its "Future Matches, based on how you finish your current schedule" table
+(`PoolSheetReportControl` iterating `Play.SortedTeams`). A slot stands for the **finishing position**
+equal to its entry-seed rank (`EntrySeedRank`), not for the team in it: `NextCompetingMatch`,
+`NextWorkTeamMatch` and `NextPendingReseed` look up whichever team holds that position (`FinishRank ==
+EntrySeedRank`), and before finishes are set fall back to the entry seed, so they're right before any
+names fill in. `positionExitSeed` is that position's seed into the next round (the holder's `ExitSeed`,
+else the slot's entry seed unless the rank will be reseeded): the entry seed of the slot it fills there,
+which the dashboard uses to pair a placeholder ("1st-R1P1") with its source. All five are always sent,
+null (`false`) where AES has none; the last play has no next match. Kept apart from `exitSeed`, which
+stays the team's own. See `AppendNextMatchFields()` in bridge/AESBridge.cs (dashboard ADR-018's
+2026-10-16 update).
 Bracket entries are built from AESBridge's own `brackets[]` field in `tournament_data.json`
 (already walks `Bracket.PlotMatchPositions()` — no bridge changes needed for this). The monitor
 skips pool-owned tiebreaker brackets (`isPlayoff` — see `IsFromPlayoffBracket` above, these
