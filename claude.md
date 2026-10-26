@@ -426,6 +426,10 @@ Full tournament state — dashboard upserts everything and deletes absences.
       "topSource": { ...recursive, full tree down to leaf matches... },
       "bottomSource": { ...recursive... }
     },
+    "consolationRoots": [ { ...same node shape as root... } ],  // AES Roots[1..]: 3rd-place / consolation matches
+                                      // (a Reversed root on the same semifinals, or bare matches like 5th place).
+                                      // Dashboard uses them only for labels ("Match 10") + scoring format, never
+                                      // to wire sources; [] when the bracket has only a final
     "playId": -50054,                 // Bracket PlayID (bridge bracketId) — same value its matches carry
     "teams": [                        // Play.Teams order; blank slots skipped, seed suffix stripped
       { "name": "Forest Hills Eastern", "finishRank": null,  // null until staff finalize in Scheduler
