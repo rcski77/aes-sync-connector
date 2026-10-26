@@ -995,6 +995,9 @@ def _bracket_payload(b):
         'pointsToWinNormalSet':   b.get('pointsToWinNormalSet'),
         'pointsToWinDecidingSet': b.get('pointsToWinDecidingSet'),
         'root':             root,
+        # AES's other roots (Roots[1..]): 3rd-place / consolation matches. The dashboard uses them only for
+        # labels ("Match 10") and scoring format, never to wire sources.
+        'consolationRoots': [p for p in (_bracket_node_payload(r) for r in roots[1:] if r.get('match')) if p],
         # Standings for the dashboard's finalize cards: finishRank stays null
         # until staff finalize the bracket in Scheduler (docs/BRACKET_STANDINGS_PUSH.md).
         'playId':           b.get('bracketId'),
