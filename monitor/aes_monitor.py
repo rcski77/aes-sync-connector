@@ -112,6 +112,11 @@ CMD_AUTO_PRINT_MATCHES   = 17153
 REMOTE_MATCH_DATA        = '33281'   # score entry
 REMOTE_FINISH_DATA       = '33282'   # pool finish ranks set/cleared
 
+# Outbox command forms this build supports beyond the original ones, sent as
+# `capabilities` on every /snapshot so the dashboard only queues what we can apply.
+#   finish_ranks_clear: finish_ranks entries with "rank": null clear that team's rank.
+CAPABILITIES = ('finish_ranks_clear',)
+
 OUTCOMES = {
     '0': 'Undecided', '1': 'FirstTeamWon', '2': 'SecondTeamWon',
     '3': 'Tie', '4': 'FirstTeamForfeit', '5': 'SecondTeamForfeit',
@@ -435,13 +440,20 @@ def _merge_finish_ranks(cmd, tournament_data):
     if not changes:
         raise FinishRejected('no finish ranks in the command')
     for ch in changes:
-        tn, rank = int(ch['teamNumber']), int(ch['rank'])
+        # rank null = clear that team's rank (a blank FinishData slot, which AES's
+        # UpdateWithRemoteEntryData turns into FinishRank = null). A clear is always
+        # an explicit request, so it needs no `overwrite`.
+        tn = int(ch['teamNumber'])
+        rank = None if ch.get('rank') is None else int(ch['rank'])
         if tn < 0 or tn >= len(tas):
             raise FinishRejected(f'team #{tn} is not a slot in this play')
         name = ch.get('name')
         slot_name = _strip_seed(tas[tn].get('team') or '')
         if name and slot_name.lower() != _strip_seed(name).lower():
             raise FinishRejected(f'team #{tn} is {slot_name or "empty"} in AES, not {name} - refresh and try again')
+        if rank is None:
+            final[tn] = None
+            continue
         if rank < 1 or rank > len(tas):
             raise FinishRejected(f'rank {rank} is outside 1-{len(tas)}')
         if current[tn] is not None and current[tn] != rank and not overwrite:
@@ -1069,6 +1081,7 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
         'aesEventId':    event_id,
         'aesEventIdKey': _event_id_key(tournament_data),
         'writebackEnabled': allow_writeback,
+        'capabilities':  list(CAPABILITIES),
         'snapshotTime':  _utc_iso_ms(now),
         'matches':       [_match_payload(m) for m in tournament_data.get('matches', [])],
         'pools':         pools,
@@ -1395,6 +1408,7 @@ def monitor(cfg):
     print(f"\n{'═'*62}")
     print(f"  AES Sync Monitor")
     print(f"  Version:   {BUILD_LABEL}")
+    print(f"  Supports:  {', '.join(CAPABILITIES)}")
     print(f"{'═'*62}")
     print(f"  AES:       {host}:{port}")
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")

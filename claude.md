@@ -358,6 +358,9 @@ Full tournament state — dashboard upserts everything and deletes absences.
                              // it, not flip it to false — treat staleness of the whole
                              // snapshot (not just this field) as the "connector is gone"
                              // signal.
+  "capabilities": ["finish_ranks_clear"],  // outbox command forms this build supports beyond
+                             // the originals (CAPABILITIES in aes_monitor.py); the dashboard
+                             // only sends those to connectors that list them. Absent = older build.
   "snapshotTime": "2025-06-28T17:00:00.000Z",  // ms precision, same clock as /pool observedAt
   "matches": [ ...same match shape as delta... ],
   "pools": [{
@@ -561,6 +564,14 @@ non-`overwrite` changes, splits a reorder of existing ranks into clear-then-set
 (`_finish_steps`), then the main loop patches the cache (`_apply_finish_data` /
 `_apply_bracket_finish_data`) and re-pushes `/pool` or `/bracket` before acking.
 Contract: `docs/DASHBOARD_OUTBOX_API.md`. Not yet verified against a live AES.
+
+**Clearing (`rank: null`, capability `finish_ranks_clear`):** a command entry with
+`rank: null` clears that team's rank; the monitor passes it to the bridge as `-`,
+which goes out as `""`. Verified in the decompiled source: `UpdateWithRemoteEntryData`
+turns a slot that fails `int.TryParse` into `FinishRank = null`, and the setter
+stores `-1`, the same "unset" value a fresh `TeamAssignment` has (no 0 or other
+sentinel). Clears need no `overwrite`; mixed set/clear commands are merged like any
+other. Advertised as `capabilities` on every snapshot.
 
 **Verified against a real running AES test instance (2026-07-10):** a write
 applies, work-team fields survive an outcome/score-only correction unchanged
