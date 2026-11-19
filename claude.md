@@ -317,6 +317,12 @@ through (signals a score was cleared). Single match only.
 {
   "aesEventId": "33281",
   "aesEventIdKey": "PTAwMDAwMzMyODE90",  // derived AES web API string ID (see note below)
+  "observedAt": "2025-06-28T17:00:00.123Z",  // when the connector READ this change from AES (frame came
+                             // off the socket, before bridge decode) — NOT when the POST goes out. Deltas
+                             // post on separate threads and can arrive out of order; the dashboard orders
+                             // them by this. Same _utc_iso_ms clock/format as snapshotTime and /pool
+                             // observedAt. The pool push triggered by the same update shares the value.
+                             // Write-back deltas (AES never echoes them) use the send time.
   "match": {
     "matchId": -51376,
     "playId": -61133,       // pool/bracket PlayID the match belongs to
