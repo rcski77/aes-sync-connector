@@ -209,6 +209,11 @@ lets the dashboard tell whether *this* connector will actually poll/apply
 outbox commands before it lets a director queue a correction. See
 `docs/DASHBOARD_OUTBOX_API.md`.
 
+Also includes `capabilities` (the `CAPABILITIES` tuple, currently
+`["finish_ranks_clear"]`): outbox command forms this build supports beyond the
+originals, which the dashboard checks before sending them. Add to it when a new
+command form lands; the startup banner prints it under `Supports:`.
+
 `push_snapshot` also takes optional `now` / `gold_spots_map` (so the main loop
 computes each once per update) and returns the `(pools[], brackets[])` payloads it sent.
 

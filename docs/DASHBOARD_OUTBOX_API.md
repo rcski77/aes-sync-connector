@@ -16,6 +16,11 @@ outcome corrections (`score_correction`), and pool/bracket finish ranks
 (`finish_ranks`, see below) — no work-team reassignment, no reseed seeds (AES
 takes no remote update for those).
 
+**Capabilities.** Every snapshot also carries `"capabilities": [...]`, the
+outbox command forms this connector build supports beyond the originals.
+Currently `"finish_ranks_clear"` (`finish_ranks` entries with `rank: null`, see
+below). A missing field means an older connector with none of them.
+
 **Check `writebackEnabled` before showing any correction UI.** Every
 `/api/ingest/snapshot` payload (the connector's existing full-state push, sent
 on connect and every ~3 minutes) includes a `writebackEnabled` boolean
@@ -99,6 +104,39 @@ update — the same payload AES's own Results Entry sends.
   different team.
 - `overwrite`: optional, default `false`. Without it, a command that changes a
   rank AES already has (to a different rank) is rejected.
+
+**Clearing ranks (`rank: null`)** — only to connectors whose latest snapshot lists
+`"finish_ranks_clear"` in `capabilities` (older connectors reject a null rank as
+a bad command). An entry `{ "teamNumber": n, "rank": null, "name": "..." }`
+clears that team's rank: the connector sends a blank slot (`""`), which AES's
+`UpdateWithRemoteEntryData` reads as `FinishRank = null` — the same value AES's
+own Results Entry sends for an unranked team. To clear a whole play, list every
+team with `rank: null`:
+
+```json
+{
+  "id": "cmd_ghi789",
+  "type": "finish_ranks",
+  "playId": -61133,
+  "finishRanks": [
+    { "teamNumber": 0, "rank": null, "name": "Sky High 17 Elite" },
+    { "teamNumber": 1, "rank": null, "name": "COLAVOL 17 Black" },
+    { "teamNumber": 2, "rank": null, "name": "414 - 17 Outlaws" },
+    { "teamNumber": 3, "rank": null, "name": "Forest Hills Eastern" }
+  ]
+}
+```
+- A clear never needs `overwrite` — the null is the explicit request. The
+  `name` check still applies: a clear naming a team that's no longer in that
+  slot is `rejected`.
+- **Mixed commands work**: some entries null, some ranked. They're merged and
+  checked like any other command — a rank given to a team must not collide with
+  a rank that stays, and changing an existing different rank still needs
+  `overwrite`. A rank freed by a clear in the same command can be given to
+  another team (the connector orders or splits the writes so AES never sees two
+  teams holding it).
+- Ack: `applied` once the blank ranks are sent, including when AES already had
+  every named team unranked (nothing to send; the play is still re-pushed).
 
 What the connector does with it:
 1. **Merge** with the play's current ranks from its cached copy (the last full
