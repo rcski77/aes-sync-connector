@@ -893,8 +893,13 @@ def _pool_payload(p, gold_spots_map=None):
     }
 
 
-def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_headers=None):
-    """POST a single score delta to /api/ingest/delta."""
+def push_delta(entry_obj, tournament_data, observed_at, base_url, ingest_key, timeout, cf_headers=None):
+    """POST a single score delta to /api/ingest/delta.
+
+    observed_at: tz-aware datetime of when the connector read this change from AES (the
+    update arrived off the socket, or the write-back was sent) — NOT when this POST goes
+    out. Deltas post on their own threads and can land out of order; the dashboard orders
+    them by this value. Required, so no delta can go out without it."""
     if not base_url or not entry_obj:
         return
     vals = entry_obj.get('values') or []
@@ -934,6 +939,7 @@ def push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout, cf_hea
     payload = {
         'aesEventId':    event_id,
         'aesEventIdKey': _event_id_key(tournament_data),
+        'observedAt':    _utc_iso_ms(observed_at),
         'match': {
             'matchId':   match_id,
             'playId':    match_info.get('playId'),
@@ -1449,6 +1455,8 @@ def monitor(cfg):
                     nc   = cin.rcmd()
                     cc   = cin.rint()
                     data = cin.rdata()
+                    # Taken the moment the frame is read, before any bridge subprocess / decode work.
+                    received_at = datetime.datetime.now(datetime.timezone.utc)
                 except socket.timeout:
                     while allow_writeback and not outbox_q.empty():
                         cmd = outbox_q.get_nowait()
@@ -1480,11 +1488,12 @@ def monitor(cfg):
                             # never fires from the CMD_REMOTE_ENTRY_UPDATE branch
                             # below for a self-originated correction — push it now
                             # instead of waiting up to 3 min for the next snapshot.
-                            push_delta(entry_obj, prev_data, base_url, ingest_key, timeout, cf_headers)
+                            # Observed = when we sent the correction into AES (no AES read exists).
+                            observed_at = datetime.datetime.now(datetime.timezone.utc)
+                            push_delta(entry_obj, prev_data, observed_at, base_url, ingest_key, timeout, cf_headers)
                             pool = _apply_score_to_pool(entry_obj, prev_data)
                             if pool:
-                                _push_pool_if_changed(pool, prev_data, last_sent_pools,
-                                                      datetime.datetime.now(datetime.timezone.utc),
+                                _push_pool_if_changed(pool, prev_data, last_sent_pools, observed_at,
                                                       base_url, ingest_key, timeout, cf_headers)
                         threading.Thread(
                             target=_ack_outbox,
@@ -1579,15 +1588,14 @@ def monitor(cfg):
 
                         # Push delta immediately
                         if obj and base_url:
-                            push_delta(obj, prev_data, base_url, ingest_key, timeout, cf_headers)
+                            push_delta(obj, prev_data, received_at, base_url, ingest_key, timeout, cf_headers)
 
                         # AES won't send the full file until its 2-min timer, so
                         # patch the score into our cached copy and push the
                         # pool's recomputed standings now.
                         pool = _apply_score_to_pool(obj, prev_data)
                         if pool:
-                            _push_pool_if_changed(pool, prev_data, last_sent_pools,
-                                                  datetime.datetime.now(datetime.timezone.utc),
+                            _push_pool_if_changed(pool, prev_data, last_sent_pools, received_at,
                                                   base_url, ingest_key, timeout, cf_headers)
 
                     else:

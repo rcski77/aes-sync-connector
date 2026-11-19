@@ -112,7 +112,7 @@ The monitor posts to two endpoints. Auth: `Authorization: Bearer <ingest_key>`.
 
 | Endpoint | Trigger | Payload |
 |---|---|---|
-| `POST /api/ingest/delta` | Every score entry with set scores | Single match result |
+| `POST /api/ingest/delta` | Every score entry with set scores | Single match result (with `observedAt`, when the connector read it from AES) |
 | `POST /api/ingest/snapshot` | On connect, then every 3 minutes | Full tournament state |
 
 See `CLAUDE.md` for full payload schemas.

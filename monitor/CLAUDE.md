@@ -193,7 +193,11 @@ Builds payload from:
 2. Match metadata looked up from `prev_data` (team names, courtId, court, times, division)
 
 ```python
-push_delta(entry_obj, tournament_data, base_url, ingest_key, timeout)
+push_delta(entry_obj, tournament_data, observed_at, base_url, ingest_key, timeout)
+# observed_at (required): datetime taken as soon as the frame is read off the AES socket
+# (received_at in the main loop), before decode/bridge work. Sent as top-level "observedAt"
+# via _utc_iso_ms; the same value stamps the /pool push from that update. Write-back deltas
+# use the time the correction was sent. Needed because deltas post on their own threads.
 ```
 
 ### Snapshot — POST {base_url}/snapshot
