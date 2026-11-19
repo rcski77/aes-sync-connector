@@ -47,9 +47,9 @@ echo Build: local %BUILD_SHA% (%BUILD_BRANCH%%BUILD_DIRTY%), built %BUILD_DATE%
 :: Build single-file exe
 python -m PyInstaller ^
     --onefile ^
-    --name aes_monitor ^
+    --name "Relay Sync" ^
     --console ^
-    --distpath dist ^
+    --distpath build\exe ^
     --workpath build ^
     --specpath build ^
     monitor\aes_monitor.py
@@ -60,17 +60,19 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-:: Copy bridge binaries
-copy /y bridge\bin\Release\net48\AESBridge.exe dist\AESBridge.exe
-copy /y bridge\bin\Release\net48\EventScheduler_Release.exe dist\EventScheduler_Release.exe
-
-:: Copy the config template as .example, like the release zip, so it never competes with a real config
-:: (aes_config.ini or a dashboard-downloaded connector-config-<eventId>.ini) copied in beside it.
-:: It already has exe = AESBridge.exe for this flat layout.
-copy /y monitor\aes_config.ini.example dist\aes_config.ini.example >nul
-echo Copied dist\aes_config.ini.example. Put your real config (aes_config.ini or connector-config-*.ini) next to it.
+:: Stage the layout: exe + README at the top, bridge files under app\ (data\ is made at first run).
+if exist "dist\Relay Sync" rmdir \s \q "dist\Relay Sync"
+mkdir "dist\Relay Sync\app"
+copy \y "build\exe\Relay Sync.exe" "dist\Relay Sync\" >nul
+copy \y monitor\README.txt "dist\Relay Sync\README.txt" >nul
+copy \y bridge\bin\Release\net48\AESBridge.exe "dist\Relay Sync\app\" >nul
+copy \y bridge\bin\Release\net48\EventScheduler_Release.exe "dist\Relay Sync\app\" >nul
+:: Config template as .example so it never competes with a real config (aes_config.ini or a
+:: dashboard-downloaded connector-config-<eventId>.ini) placed beside Relay Sync.exe.
+copy \y monitor\aes_config.ini.example "dist\Relay Sync\app\aes_config.ini.example" >nul
+echo Put your real config (aes_config.ini or connector-config-*.ini) next to "Relay Sync.exe".
 
 echo.
-echo === Build complete — dist\ is ready to deploy ===
+echo === Build complete — dist\Relay Sync\ is ready to deploy ===
 echo.
 pause

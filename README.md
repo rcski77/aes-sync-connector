@@ -8,7 +8,7 @@ Bridges AES Scheduler (EventScheduler.exe) to a live tournament director dashboa
 EventScheduler.exe (port 17471)
         │
         ▼
-  aes_monitor.exe          ← Python — handles encrypted AES protocol
+  Relay Sync.exe           ← Python — handles encrypted AES protocol
         │ subprocess
         ▼
   AESBridge.exe            ← C# — deserializes proprietary binary format
@@ -34,10 +34,10 @@ build.bat
 
 Builds everything in one step:
 1. Compiles `AESBridge.exe` (.NET 4.8)
-2. Bundles `aes_monitor.exe` with PyInstaller
-3. Assembles `dist\` with all required files
+2. Bundles `Relay Sync.exe` with PyInstaller
+3. Assembles `dist\Relay Sync\` with the layout below
 
-Each build copies the template to `dist\aes_config.ini.example`, never to a live config. Before deploying, add your real config next to it: `aes_config.ini`, or the `connector-config-<eventId>.ini` downloaded from the dashboard.
+Each build puts the template at `dist\Relay Sync\app\aes_config.ini.example`, never as a live config. Before deploying, add your real config next to `Relay Sync.exe`: `aes_config.ini`, or the `connector-config-<eventId>.ini` downloaded from the dashboard.
 
 > **Note:** Requires Python 3.9+ and .NET SDK on PATH. `build.bat` will look for `dotnet` on PATH first, then fall back to `C:\Program Files\dotnet\dotnet.exe`.
 
@@ -54,22 +54,23 @@ They also generate the per-event key and config file there.
 Copy the contents of `dist\` to the tournament laptop:
 
 ```
-aes-sync\
-├── aes_monitor.exe
-├── AESBridge.exe
-├── EventScheduler_Release.exe
-├── aes_config.ini.example
-└── aes_config.ini            ← your real config (or connector-config-<eventId>.ini)
+Relay Sync\
+├── Relay Sync.exe
+├── README.txt                ← director-facing setup steps (monitor\README.txt)
+├── aes_config.ini            ← your real config (or the dashboard's connector-config-<eventId>.ini)
+├── app\                      ← AESBridge.exe, EventScheduler_Release.exe, aes_config.ini.example
+└── data\                     ← created at first run: scheduler_file.bin, tournament_data.json, ...
 ```
 
-Double-click `aes_monitor.exe` to run. No Python installation required on the target machine.
+The release zip (`aes-sync-connector.zip`) has this same layout inside a top-level `Relay Sync\` folder, so
+unzipping never scatters files. Double-click `Relay Sync.exe` to run. No Python installation required on the target machine.
 
 ## Configuration
 
 Edit `aes_config.ini` — no rebuild needed after changes, just restart the exe.
 
 The dashboard can generate a per-event config with its own ingest API key —
-download it and drop it into the same folder as `aes_monitor.exe`. If no
+download it and drop it into the same folder as `Relay Sync.exe`. If no
 `aes_config.ini` is present, the monitor will automatically pick up a
 `connector-config-<eventId>.ini` file instead (fill in your AES host/port/
 password and bridge exe path the first time). Keep only one config file in
@@ -82,7 +83,7 @@ port     = 17471
 password = your_aes_password
 
 [bridge]
-exe = AESBridge.exe         ; path relative to aes_monitor.exe
+exe = app\AESBridge.exe     ; relative to Relay Sync.exe; optional (see below)
 
 [dashboard]
 endpoint   = https://your-dashboard.com/api/ingest
@@ -93,6 +94,15 @@ timeout    = 30
 cf_client_id     =
 cf_client_secret =
 ```
+
+### Where the bridge is found
+
+`Relay Sync.exe` logs which one it used at startup. In order: the `[bridge] exe` setting (relative to the exe
+folder), `app\AESBridge.exe`, `AESBridge.exe` next to the exe (an old flat folder), then the dev build path
+(`..\bridge\bin\Release\net48\AESBridge.exe`, when run from source). So an old flat folder, and an old
+downloaded `.ini` saying `exe = AESBridge.exe` inside the new layout, both keep working.
+
+Working files go to `data\` (created on start). Old flat folders may have these next to the exe; they are ignored.
 
 ## Cloudflare Tunnel Setup
 
@@ -140,5 +150,7 @@ Run the monitor directly during development:
 cd monitor
 python aes_monitor.py
 ```
+
+From source, the config is read from `monitor\` and the working files go to `monitor\data\` (gitignored).
 
 Use `aes_test.py` to verify AES connectivity before running the full monitor.

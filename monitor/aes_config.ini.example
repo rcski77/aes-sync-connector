@@ -7,7 +7,7 @@ password = your_aes_password
 allow_writeback = false
 
 [bridge]
-exe = AESBridge.exe
+exe = app\AESBridge.exe
 
 [dashboard]
 endpoint          = https://your-dashboard.com/api/ingest

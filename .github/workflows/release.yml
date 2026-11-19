@@ -38,31 +38,25 @@ jobs:
           # The label the monitor prints at startup - the same name as the release published below.
           $sha = git rev-parse --short HEAD
           "BUILD = `"build-${{ github.run_number }}-$sha`"" | Out-File -Encoding utf8NoBOM monitor/_build_info.py
-          python -m PyInstaller --onefile --name aes_monitor --console `
-            --distpath out/pkg --workpath out/build --specpath out/build monitor/aes_monitor.py
+          python -m PyInstaller --onefile --name "Relay Sync" --console `
+            --distpath out/exe --workpath out/build --specpath out/build monitor/aes_monitor.py
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
-          Copy-Item bridge/bin/Release/net48/AESBridge.exe out/pkg/
-          Copy-Item bridge/bin/Release/net48/EventScheduler_Release.exe out/pkg/
-          Copy-Item monitor/aes_config.ini.example out/pkg/
+          # Stage the director-facing layout in a fresh folder. Only files copied here get zipped,
+          # so stray files can never ride along. data/ is created by the monitor at first run.
+          #   Relay Sync/
+          #     Relay Sync.exe, README.txt   <- what the director sees
+          #     app/                         <- bridge + AES assembly + config example (leave alone)
+          $root = "out/pkg/Relay Sync"
+          New-Item -ItemType Directory -Force "$root/app" | Out-Null
+          Copy-Item "out/exe/Relay Sync.exe" $root
+          Copy-Item bridge/bin/Release/net48/AESBridge.exe "$root/app/"
+          Copy-Item bridge/bin/Release/net48/EventScheduler_Release.exe "$root/app/"
+          Copy-Item monitor/aes_config.ini.example "$root/app/"
+          Copy-Item monitor/README.txt "$root/README.txt"
+          (Get-Content "$root/README.txt" -Raw) -replace '\{BUILD\}', $sha | Out-File -Encoding utf8 "$root/README.txt"
 
-          @"
-          AES Sync Client
-          ===============
-
-          1. Unzip this folder onto the laptop running AES Scheduler.
-          2. On the tournament dashboard, open the event's Settings screen, generate the sync client key,
-             and download its config (connector-config-<event>.ini). Save it in this folder.
-          3. Open that .ini and fill in the AES Scheduler password under [aes].
-          4. Double-click aes_monitor.exe.
-
-          Keep only one config file in this folder. aes_config.ini.example shows every setting.
-          Build: $(git rev-parse --short HEAD)
-          "@ | Out-File -Encoding utf8 out/pkg/README.txt
-
-          # Explicit list - never zip up stray logs/configs from anything that ran in out/pkg.
-          $files = "aes_monitor.exe", "AESBridge.exe", "EventScheduler_Release.exe", "aes_config.ini.example", "README.txt"
-          Compress-Archive -Path ($files | ForEach-Object { "out/pkg/$_" }) -DestinationPath out/aes-sync-connector.zip -Force
+          Compress-Archive -Path $root -DestinationPath out/aes-sync-connector.zip -Force
 
       - name: Publish release
         shell: pwsh
