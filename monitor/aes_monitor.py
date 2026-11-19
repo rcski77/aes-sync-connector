@@ -75,6 +75,8 @@ def find_config_path():
     return default_path
 
 
+CONFIG_PATH = None  # set by load_config(), shown in the startup banner
+
 def load_config():
     cfg = configparser.ConfigParser()
     cfg_path = find_config_path()
@@ -83,8 +85,31 @@ def load_config():
         print(f"       Place aes_config.ini (or a downloaded connector-config-*.ini) in this folder.")
         sys.exit(1)
     cfg.read(cfg_path)
-    print(f"  Config:    {cfg_path}")
+    global CONFIG_PATH
+    CONFIG_PATH = cfg_path
     return cfg
+
+def exe_name():
+    """'Relay Sync.exe' when frozen, else the script's own name."""
+    return os.path.basename(sys.executable if getattr(sys, 'frozen', False) else __file__)
+
+
+def resolve_bridge(configured):
+    """Find AESBridge.exe. Order: the configured [bridge] exe (relative to the exe
+    folder), app/AESBridge.exe (new layout), AESBridge.exe next to the exe (old flat
+    folder), then the dev build path. Returns (path or None, how-it-was-found)."""
+    candidates = []
+    if configured:
+        candidates.append((os.path.join(_BASE_DIR, configured), f"configured [bridge] exe = {configured}"))
+    candidates += [
+        (os.path.join(_BASE_DIR, 'app', 'AESBridge.exe'), r"app\AESBridge.exe"),
+        (os.path.join(_BASE_DIR, 'AESBridge.exe'), "AESBridge.exe next to the exe (old flat folder)"),
+        (os.path.join(_BASE_DIR, '..', 'bridge', 'bin', 'Release', 'net48', 'AESBridge.exe'), "dev build path"),
+    ]
+    for path, how in candidates:
+        if os.path.isfile(path):
+            return os.path.normpath(path), how
+    return None, None
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -255,7 +280,15 @@ def client_init(sock, password):
 
 # ── Bridge ─────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR = _BASE_DIR
+# Working files (scheduler_file.bin, tournament_data.json, ...) live in data\ next to
+# the exe, so the folder the director sees stays tidy. Old flat folders may still hold
+# copies of these next to the exe; they're simply ignored.
+DATA_DIR = os.path.join(_BASE_DIR, 'data')
+SCRIPT_DIR = DATA_DIR  # kept as the name the file helpers below use
+
+def ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
 
 def call_bridge(raw, bridge_exe):
     """Parse SchedulerFile binary via AESBridge.exe → returns dict or None."""
@@ -1403,20 +1436,24 @@ def monitor(cfg):
     allow_writeback       = cfg.getboolean('aes', 'allow_writeback', fallback=False)
     outbox_poll_interval  = cfg.getint('dashboard', 'outbox_poll_interval', fallback=5)
 
-    # Resolve bridge path relative to script directory
-    bridge_rel = cfg.get('bridge', 'exe', fallback=r'..\bridge\bin\Release\net48\AESBridge.exe')
-    bridge_exe = os.path.join(SCRIPT_DIR, bridge_rel)
-    if not os.path.exists(bridge_exe):
-        log(f"WARNING: AESBridge.exe not found at {bridge_exe}")
+    ensure_data_dir()
+    bridge_rel = cfg.get('bridge', 'exe', fallback='').strip()
+    bridge_exe, bridge_how = resolve_bridge(bridge_rel)
+    if bridge_exe:
+        log(f"Bridge: using {bridge_exe} ({bridge_how})")
+    else:
+        log(f"WARNING: AESBridge.exe not found (looked for [bridge] exe, app/AESBridge.exe, "
+            f"AESBridge.exe next to {exe_name()}, dev path)")
         log(f"         Raw binary will be saved but scores won't be parsed or pushed")
-        bridge_exe = None
 
     print(f"\n{'═'*62}")
-    print(f"  AES Sync Monitor")
+    print(f"  Relay Sync  ({exe_name()})")
     print(f"  Version:   {BUILD_LABEL}")
     print(f"  Supports:  {', '.join(CAPABILITIES)}")
     print(f"{'═'*62}")
     print(f"  AES:       {host}:{port}")
+    print(f"  Config:    {CONFIG_PATH}")
+    print(f"  Data:      {DATA_DIR}")
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")
     print(f"  Ingest:    {base_url or '(not configured — set in aes_config.ini)'}")
     print(f"  Write-back: {'ENABLED — dashboard corrections will be sent into AES' if allow_writeback else 'disabled (read-only)'}")

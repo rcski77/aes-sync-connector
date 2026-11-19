@@ -32,7 +32,8 @@ aes-connector/
 │   ├── bin/
 │   └── obj/
 ├── monitor/              ← Python scripts + config
-│   ├── aes_monitor.py        ← production monitor
+│   ├── aes_monitor.py        ← production monitor (frozen as "Relay Sync.exe")
+│   ├── README.txt            ← director-facing setup steps, shipped in the zip
 │   ├── aes_test.py           ← one-shot connection test
 │   ├── aes_sync_probe.py     ← protocol debugger
 │   └── aes_config.ini        ← config (passwords/endpoints via .env)
@@ -43,7 +44,7 @@ aes-connector/
 ## Files
 | File | Purpose |
 |------|---------|
-| monitor/aes_monitor.py | Production monitor — connects to AES, calls AESBridge, POSTs to dashboard ingest API |
+| monitor/aes_monitor.py | Production monitor (built as `Relay Sync.exe`) — connects to AES, calls AESBridge, POSTs to dashboard ingest API |
 | monitor/aes_test.py | One-shot connection test — run first to verify AES is reachable |
 | monitor/aes_sync_probe.py | Protocol debugger — try commands, log everything |
 | monitor/aes_config.ini | Config: AES host/port/password, bridge path, dashboard endpoint/key |
@@ -71,6 +72,27 @@ python aes_monitor.py
 # Reads aes_config.ini + ../.env automatically
 ```
 
+## Release layout (what directors download)
+
+The release zip (`aes-sync-connector.zip`, built by `.github/workflows/release.yml`; `build.bat` makes
+the same thing in `dist\Relay Sync\`) unzips to one top-level folder:
+```
+Relay Sync/
+  Relay Sync.exe     <- the monitor (PyInstaller --name "Relay Sync"; was aes_monitor.exe)
+  README.txt         <- monitor/README.txt
+  (connector-config-*.ini from the dashboard goes here)
+  app/   AESBridge.exe, EventScheduler_Release.exe, aes_config.ini.example
+  data/  created at first run: scheduler_file.bin, tournament_data.json, remote_entry*.bin, finish_data_out.bin
+```
+- Config is looked up next to the exe (unchanged). Working files go to `data/` (`DATA_DIR`), never beside the exe;
+  stale ones from an old flat folder are ignored. From source, `data/` is `monitor/data/` (gitignored).
+- Bridge lookup (`resolve_bridge()`), first hit wins, and the startup log says which: the configured
+  `[bridge] exe` (relative to the exe folder) -> `app/AESBridge.exe` -> `AESBridge.exe` next to the exe (old flat
+  folder) -> the dev path `../bridge/bin/Release/net48/AESBridge.exe`. So old flat folders and old dashboard
+  inis (`exe = AESBridge.exe`) keep working. The dev path is also the default when `[bridge] exe` is absent.
+- Don't rename the zip: the dashboard CI downloads `aes-sync-connector.zip` by name.
+- The brand rule: the product is "Relay" ("Relay Sync" / "Sync client"), no "AES" in our product name.
+
 ## Config
 
 The monitor reads `aes_config.ini` if present; otherwise it falls back to a
@@ -87,7 +109,7 @@ port     = 17471
 password = ${AES_PASSWORD}
 
 [bridge]
-exe = ..\bridge\bin\Release\net48\AESBridge.exe
+exe = ..\bridge\bin\Release\net48\AESBridge.exe   # optional; see "Release layout" for the lookup order
 
 [dashboard]
 endpoint   = ${DASHBOARD_ENDPOINT}   # base URL up to /api/ingest (no trailing slash)
@@ -607,7 +629,7 @@ aes_monitor.py  ←── aes_config.ini ←── .env
   │ subprocess
   ▼
 AESBridge.exe
-  │ writes monitor/tournament_data.json (intermediate)
+  │ writes data/tournament_data.json next to the exe (intermediate)
   │
   ├── on RemoteEntryUpdate → POST /api/ingest/delta   (immediate)
   ├── on EventUpdate (throttled 3 min) → POST /api/ingest/snapshot

@@ -6,6 +6,7 @@ bin/
 obj/
 
 # Runtime temp files
+data/
 scheduler_file.bin
 tournament_data.json
 remote_entry.bin

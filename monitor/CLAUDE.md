@@ -35,7 +35,7 @@ password   = ${AES_PASSWORD}
 allow_writeback = false   # opt-in: let the dashboard send score corrections into AES
 
 [bridge]
-exe = ..\bridge\bin\Release\net48\AESBridge.exe   # relative to monitor/
+exe = ..\bridge\bin\Release\net48\AESBridge.exe   # relative to the exe/monitor folder; optional, falls back via resolve_bridge()
 
 [dashboard]
 endpoint   = ${DASHBOARD_ENDPOINT}   # base URL, e.g. https://host/api/ingest
@@ -92,19 +92,19 @@ All bytes are decrypted via the inbound cipher state before parsing.
 
 ```python
 call_bridge(raw_bytes, bridge_exe)
-# Writes raw bytes to monitor/scheduler_file.bin
+# Writes raw bytes to data/scheduler_file.bin (DATA_DIR, next to the exe / monitor/data/ from source)
 # Runs AESBridge.exe <path>
-# Reads monitor/tournament_data.json → returns dict or None
+# Reads data/tournament_data.json → returns dict or None
 ```
 
 ```python
 decode_remote_entry(raw_bytes, bridge_exe)
-# Writes raw bytes to monitor/remote_entry.bin
+# Writes raw bytes to data/remote_entry.bin
 # Runs AESBridge.exe <path> --remote
 # Returns parsed dict with "values": [...] or None
 ```
 
-Runtime artifacts written to the monitor/ directory:
+Runtime artifacts written to `data/` (created at startup; see root CLAUDE.md "Release layout"):
 - `scheduler_file.bin` — last SchedulerFile binary received
 - `remote_entry.bin` — last RemoteEntryUpdate binary received
 - `remote_entry_out.bin` — last write-back payload built for sending (see below)
