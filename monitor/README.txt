@@ -26,8 +26,8 @@ Running without AES Scheduler (Host in Relay)
   no file, more than one file, a file for a different event, or a file from a
   newer AES than this Relay Sync opens (download the latest Relay Sync).
   The file stays on this laptop; Relay only gets its name and format.
-  For now Relay Sync only shows the event from the file. To change scores,
-  finishes or courts, turn Host in Relay off and use AES Scheduler as usual.
+  For now, make changes in AES and save the file in this folder. Relay Sync
+  picks up the saved file within a few seconds.
 
 Leave the "app" and "data" folders alone. They hold the files Relay Sync needs
 and the working files it creates the first time it runs.
