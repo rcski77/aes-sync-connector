@@ -61,6 +61,11 @@ class AESBridge
             if (args.Length >= 1 && args[0] == "--plays")
                 return HostBatch.Plays(args.Skip(1).ToArray());
 
+            // --vsf: Relay hosting (read-only): check and parse a dropped .vsf into tournament_data.json.
+            // Prints one JSON line with the result; never touches the network.
+            if (args.Length >= 1 && args[0] == "--vsf")
+                return HostFile(args.Skip(1).ToArray());
+
             byte[] data;
             if (args.Length > 0 && File.Exists(args[0]))
                 data = File.ReadAllBytes(args[0]);
@@ -74,27 +79,7 @@ class AESBridge
             if (data.Length == 0) { Console.Error.WriteLine("No data."); return 1; }
 
             SchedulerFile sf = SchedulerFile.Load(data);
-            sf.EnableCaching();
-
-            // Build court name → ID lookup (used to resolve internal ScheduledCourtID)
-            _courtIdByName = sf.Courts.ToDictionary(
-                c => c.Name ?? "",
-                c => c.CourtID,
-                StringComparer.OrdinalIgnoreCase);
-
-            // Team codes more than one team carries (see TeamCode)
-            try
-            {
-                _sharedTeamCodes = new HashSet<string>(sf.Teams
-                    .Select(t => (t.Code ?? "").Trim())
-                    .Where(c => c != "")
-                    .GroupBy(c => c, StringComparer.OrdinalIgnoreCase)
-                    .Where(g => g.Count() > 1)
-                    .Select(g => g.Key), StringComparer.OrdinalIgnoreCase);
-            }
-            catch { }
-
-            string json = ToJson(sf);
+            string json = BuildJson(sf);
 
             // Write to tournament_data.json next to the input file (or exe if piped)
             string outPath = args.Length > 0
@@ -115,6 +100,65 @@ class AESBridge
             Console.Error.WriteLine($"Error: {ex.Message}\n{ex.StackTrace}");
             return 1;
         }
+    }
+
+    // The tournament_data.json text for a loaded file (the live path and --vsf share it).
+    static string BuildJson(SchedulerFile sf)
+    {
+        sf.EnableCaching();
+
+        // Build court name → ID lookup (used to resolve internal ScheduledCourtID)
+        _courtIdByName = sf.Courts.ToDictionary(
+            c => c.Name ?? "",
+            c => c.CourtID,
+            StringComparer.OrdinalIgnoreCase);
+
+        // Team codes more than one team carries (see TeamCode)
+        try
+        {
+            _sharedTeamCodes = new HashSet<string>(sf.Teams
+                .Select(t => (t.Code ?? "").Trim())
+                .Where(c => c != "")
+                .GroupBy(c => c, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key), StringComparer.OrdinalIgnoreCase);
+        }
+        catch { }
+
+        return ToJson(sf);
+    }
+
+    // ── --vsf (Relay hosting, read-only) ─────────────────────────────────────
+    // --vsf <in.vsf> <out.json>: the format check of HostBatch.LoadChecked, then the same parse as the live
+    // path, written to <out.json>. stdout is one JSON line: {"ok":true,"format":N,"supported":M} or
+    // {"ok":false,"reason":"refused_format"|"load_failed","format":N,"supported":M,"error":"..."}. The error
+    // text is the loader's own message, never file contents. Exit 0 for both; 2 for bad arguments.
+    static int HostFile(string[] args)
+    {
+        if (args.Length != 2 || !File.Exists(args[0])) { Console.Error.WriteLine("Usage: --vsf <in.vsf> <out.json>"); return 2; }
+        int supported = HostBatch.SupportedVersion;
+        int version = 0;
+        string Result(bool ok, string reason, string error) =>
+            "{\"ok\": " + B(ok) + (reason == null ? "" : ", \"reason\": " + S(reason)) +
+            ", \"format\": " + version + ", \"supported\": " + supported +
+            (error == null ? "" : ", \"error\": " + S(error)) + "}";
+        byte[] data;
+        try { data = File.ReadAllBytes(args[0]); }
+        catch (Exception ex) { Console.WriteLine(Result(false, "load_failed", ex.GetType().Name + ": " + ex.Message)); return 0; }
+        if (data.Length < 8) { Console.WriteLine(Result(false, "load_failed", "not a scheduler file")); return 0; }
+        version = BitConverter.ToInt32(data, 0);
+        if (version > supported) { Console.WriteLine(Result(false, "refused_format", "format newer than this AES assembly")); return 0; }
+        if (version <= 0) { Console.WriteLine(Result(false, "load_failed", "not a scheduler format version")); return 0; }
+        SchedulerFile sf;
+        try { sf = SchedulerFile.Load(data); }
+        catch (Exception ex) { Console.WriteLine(Result(false, "load_failed", ex.GetType().Name + ": " + ex.Message)); return 0; }
+        try
+        {
+            File.WriteAllText(args[1], BuildJson(sf), Encoding.UTF8);
+        }
+        catch (Exception ex) { Console.WriteLine(Result(false, "load_failed", "parse: " + ex.GetType().Name + ": " + ex.Message)); return 0; }
+        Console.WriteLine(Result(true, null, null));
+        return 0;
     }
 
     // ── Remote entry decoder ───────────────────────────────────────────────────

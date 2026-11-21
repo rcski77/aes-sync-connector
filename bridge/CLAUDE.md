@@ -22,6 +22,7 @@ Always build after editing AESBridge.cs to catch C# string escaping bugs early.
 ```
 AESBridge.exe <path-to-binary>           # parse SchedulerFile → tournament_data.json
 AESBridge.exe <path-to-binary> --remote  # decode RemoteEntryUpdate String[] payload
+AESBridge.exe --vsf <in.vsf> <out.json>   # Relay hosting: format check + the same parse, one JSON result line
 AESBridge.exe --encode-remote <outFile> <fileIdGuid> <matchId> <outcome> <workTeamNumber> <typeOfWorkTeam> [<t1> <t2> ...]
                                           # encode a score correction (write-back direction)
 AESBridge.exe --roundtrip <in.vsf> <out.vsf>        # test: load + save through AES's own code
@@ -33,6 +34,13 @@ AESBridge.exe --plays <in.vsf>                      # spike: list rounds/plays/s
 AESBridge.exe --publish <file.vsf> --key <ServerSafeKey> [--force-results-import]
                                                     # spike: publish to AES's servers like Update Now (asks for the AES login)
 ```
+`--vsf` is what Relay Sync's hosting mode calls (monitor/CLAUDE.md, "Relay hosting"). It refuses a format
+newer than `HostBatch.SupportedVersion` (the assembly's `SchedulerFile.CURRENT_VERSION`), loads the file with
+`SchedulerFile.Load`, and writes `<out.json>` through `BuildJson`, the same code the live path uses (so a hosted
+file and AES's push of the same file give identical JSON). stdout is one line:
+`{"ok": true, "format": N, "supported": M}` or `{"ok": false, "reason": "refused_format"|"load_failed", "format": N,
+"supported": M, "error": "..."}`, exit 0 either way (2 for bad arguments). No network.
+
 `--host-batch` and `--plays` are in `HostBatch.cs` (headless host-loop spike; see
 `docs/WRITE_BACK_EDITOR_SCOPING.md`, "Headless host loop"). They never open a network
 connection. `changes.json` is an array, or `{ "forceResultsImport": false, "changes": [...] }`,
