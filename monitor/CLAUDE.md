@@ -103,17 +103,18 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
   only when the file's mtime/size change, and not while it was modified in the last 2 s), then compares
   `_event_id_key()` of the parsed file with the dashboard's `aesEventIdKey` (event id, or the name for a
   hand-built event, as for every other push).
-- Hosting: sets `relay_host.hosting`, prints the event name, counts and format, and calls `push_snapshot`
-  (`writebackEnabled: false`) on start, whenever the file changes, and every `SNAPSHOT_INTERVAL`, so the
-  dashboard keeps seeing a live connector.
+- Hosting: sets `relay_host.hosting`, prints the event name, counts and format, and calls `push_snapshot` of the
+  working copy (`RelayHost.push_latest`; `writebackEnabled: true`, false in a conflict) on start, after each batch
+  and every `SNAPSHOT_INTERVAL`, so the dashboard keeps seeing a live connector (phase 3 below).
 - `monitor()`'s AES loop checks `relay_host.hosting` every second (the `socket.timeout` branch raises
   `_HostingStarted`), drops the AES connection and waits while hosting. Anything short of `hosting` (switch
   off, file removed, a refused file) clears it and the AES loop reconnects as before.
 - A dashboard without `/hosting` answers 404: logged once, the switch stays off and the AES sync runs as before.
 - The folder check skips `* (Relay latest).vsf`. When hosting stops (`RelayHost.stop_hosting`: switch off, file
   gone or refused, Ctrl+C, or the console window closed, through a `SetConsoleCtrlHandler` handler) it copies
-  `data/relay_latest.vsf` (the latest version: in phase 2 the dropped file as last loaded) to
-  `<file name> (Relay latest).vsf` next to the dropped file, for AES desktop.
+  `data/relay_latest.vsf` (a copy of the working copy, `data/versions/current.vsf`) to
+  `<file name> (Relay latest).vsf` next to the dropped file, for AES desktop. It takes `write_lock` first, so a
+  batch being applied finishes before the copy.
 
 ## Relay hosting: AES sign-in and publishing (phase 2)
 
@@ -127,13 +128,14 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
 - **Publishing** (`RelayPublisher`, its own thread, so a publish never holds up the 10-second report): the first
   publish right after hosting starts and the sign-in is good, then every `publishIntervalMinutes` (from the
   `/hosting` answer, clamped 3–60, default 3) after the last attempt, whether or not anything changed (AES desktop's
-  Auto Update). Never right after a file change. It publishes `data/relay_latest.vsf` with `key` = the dashboard's
+  Auto Update). Never right after a file change. It publishes a copy of `data/relay_latest.vsf` taken under the
+  host's lock (`data/relay_publish.vsf`, so a batch saved meanwhile can't change it mid-publish) with `key` = the dashboard's
   `aesEventIdKey`; the bridge refuses a file whose `ServerSafeKey` differs. `sign_in_invalid` deletes the saved
   login and asks again.
 - **Publish now** comes on the `/hosting` answer as `publishNowRequestedAt`; a stamp different from the last one
   handled publishes once (and resumes after another publisher), and it is reported back as `publishNowHandled`. Not
-  the outbox: Relay Sync doesn't poll the outbox while hosting (no AES connection, write-back off), while `/hosting`
-  runs every 10 s. A stamp already there when hosting starts counts as handled.
+  the outbox: it steers the hosting itself and must work in a conflict, when the outbox isn't polled; `/hosting`
+  runs every 10 s. A stamp already there when hosting starts counts as handled. Nothing is published in a conflict.
 - **Read-back** (`fetch_online_view`): `GET https://results.advancedeventsystems.com/api/event/{key}/courts/{date}/240`
   once per event date (`event_dates`), compared per match on court name, `HasOutcome` and both team texts with the
   hosted parse (`expected_view`, `view_differences`; AES shows a team as "name (seed)", so a " (...)" suffix is
@@ -146,6 +148,42 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
 - Report fields (only while `hosting`): `signedIn`, `publishing`, `publishIntervalMinutes`, `lastPublishAt`,
   `lastPublishResult` (the bridge's word), `nextPublishAt`, `readBack`, `otherPublisherAt`, `publishNowHandled`.
   Never the email. Contract: the dashboard's `docs/reference/ingest-api.md`, "Relay hosting".
+
+## Relay hosting: change batches and versions (phase 3)
+
+- **Outbox while hosting** (`RelayBatcher`, its own thread): polls `{endpoint}/outbox` every `outbox_poll_interval`
+  (default 5 s) while hosting and not in a conflict, whatever `allow_writeback` says (that setting is about writing
+  into a live AES; hosting writes only Relay's own copy). Each poll's commands are one batch: `command_change` maps a
+  `score_correction` to a `score` change (sets as given, `outcome` passed through; cached sets if the command has
+  none) and a `finish_ranks` to a `finish` change (merged with the working copy's ranks by `_merge_finish_ranks`, as
+  on the live path, a second command for the same play building on the first). A match or play the file doesn't
+  have, a rank clash or a bad command is acked `rejected` and left out; ranks already set are acked `applied`.
+- **Apply**: `AESBridge.exe --host-apply current.vsf batch_out.vsf batch_changes.json batch_out.json`
+  (`host_apply`). On `ok`: the output becomes the working copy, the parse becomes the latest data
+  (`RelayHost.set_latest`), a snapshot is posted synchronously, then every command is acked `applied`. On `rejected`
+  with an `index`: that command is acked `rejected` ("AES refused it: ...") and the rest are tried again. Anything
+  else (`verify_failed`, `error`, ...): nothing was written, every command is acked `failed` (redelivered) and the
+  poller waits `BATCH_RETRY_SECONDS` (30).
+- **Versions** (`VersionStore`, `data/versions/`): `current.vsf` is the working copy; a version is a real change,
+  kept as `vNNNN.vsf` + `vNNNN.json`: kind `file` (the dropped file), `batch` (a batch with more than `score`/`finish`
+  changes: moves and reseeds, phase 4), `rollback` (a copy of version `from`) and `backup` (`backup_if_due`: hourly,
+  only when score or finish batches came since the newest version, so quiet hours make none). Score and finish
+  batches only replace `current.vsf` and are logged in `batches.jsonl` (time, the version they built on, what changed,
+  command ids). `index.json` holds the event key, the dropped file's sha256 (`fileSha`), `changesSinceFile`,
+  `changesSinceVersion` and the list (each with `decided`/`matches` counts). The dropped file is never written.
+- **The dropped file** (`VersionStore.adopt`, on hosting start and on every file change): versions of another event
+  are moved aside to `data/versions-<time>`; same content as `fileSha` = carry on from `current.vsf` (also after a
+  restart); different content with nothing applied since it was taken = a new `file` version; otherwise a
+  **conflict**: no outbox polling, no publishing, snapshots with `writebackEnabled: false`, `conflictAt` reported.
+  The director's `conflictChoice` on the `/hosting` answer: `keep` (`acknowledge`: this content is now known and
+  ignored) or `file` (a new `file` version from it).
+- **Publish this version** (`publishVersion` on the answer, `rollback_if_requested`): a new `rollback` version copied
+  from that one becomes the working copy, a snapshot is posted, and `publish_requested` makes the publisher publish
+  at once. Ignored in a conflict or for a version not on disk.
+- Report fields (only while `hosting`): `latestVersion`, `versionCount`, `changesSinceVersion`, `versions` (the
+  newest 20, each with at most 6 change lines: match and pool short names and scores, never a team's or person's
+  name), `conflictAt`, `conflictChoiceHandled`, `publishVersionHandled`. Stamps already on the answer when hosting
+  starts count as handled.
 
 ## AESBridge Invocation
 

@@ -39,8 +39,12 @@ Running without AES Scheduler (Host in Relay)
   When hosting stops (switch off, file removed, Relay Sync closed), Relay Sync
   saves "<your file> (Relay latest).vsf" next to your file. Open that one in AES
   Scheduler to carry on there.
-  For now, make changes in AES and save the file in this folder. Relay Sync
-  picks up the saved file within a few seconds.
+
+  While hosting, enter scores and finishes in Relay as usual. Relay Sync puts
+  them into its own copy of the file (in the data folder); your file is never
+  changed. Don't edit the event in AES Scheduler meanwhile: if your file changes,
+  Relay Sync stops and the Settings screen asks whether to keep Relay's copy or
+  start over from your file.
 
 Leave the "app" and "data" folders alone. They hold the files Relay Sync needs
 and the working files it creates the first time it runs.

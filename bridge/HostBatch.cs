@@ -65,6 +65,7 @@ using AES.Scheduler.Model;
 
 static class HostBatch
 {
+    const int MatchDataType = 33281;    // RemoteEntryUpdateType.MatchData
     const int FinishDataType = 33282;   // RemoteEntryUpdateType.FinishData
     const int PostEventCommand = 9216;  // SchedulerNetCommand.PostEvent
     const byte CommandWithObjectData = 0x23;
@@ -211,6 +212,128 @@ static class HostBatch
         return lost.Count == 0 ? 0 : 1;
     }
 
+    // ── --host-apply (Relay hosting, phase 3) ──────────────────────────────
+
+    // AESBridge.exe --host-apply <in.vsf> <out.vsf> <changes.json> <out.json>
+    //
+    // What Relay Sync runs for each change batch while it hosts a .vsf. The same changes as --host-batch, applied
+    // whole or not at all: every change goes through AES's model in order, then the file is saved to <out.vsf>,
+    // loaded again from disk and checked (it must hold exactly the edited model, and no data value may have changed
+    // outside the matches and plays the batch names; AES's display text may change anywhere, as results flow into
+    // later matches). Then <out.json> gets the saved file's parse (the same JSON as --vsf). Nothing is left behind
+    // when any step fails. No network. stdout is one JSON line, exit 0 (2 for bad arguments):
+    //   {"ok": true, "format": N, "supported": M, "changed": K}
+    //   {"ok": false, "reason": "bad_input"|"refused_format"|"load_failed"|"rejected"|"verify_failed"|"error",
+    //    "index": i (rejected: the 0-based change AES refused), "error": "...", "format": N, "supported": M}
+    public static int HostApply(string[] args)
+    {
+        if (args.Length != 4) { Console.Error.WriteLine("Usage: --host-apply <in.vsf> <out.vsf> <changes.json> <out.json>"); return 2; }
+        string inPath = args[0], outPath = args[1], changesPath = args[2], jsonPath = args[3];
+        foreach (string p in new[] { outPath, jsonPath, changesPath })
+            if (string.Equals(Path.GetFullPath(p), Path.GetFullPath(inPath), StringComparison.OrdinalIgnoreCase))
+            { Console.Error.WriteLine("Refusing to overwrite the input file."); return 2; }
+
+        int supported = SupportedVersion, version = 0;
+        string Result(bool ok, string reason, int? index, string error, int changedCount) =>
+            "{\"ok\": " + AESBridge.B(ok) + (reason == null ? "" : ", \"reason\": " + AESBridge.S(reason)) +
+            (index.HasValue ? ", \"index\": " + index.Value : "") +
+            ", \"format\": " + version + ", \"supported\": " + supported +
+            (ok ? ", \"changed\": " + changedCount : "") +
+            (error == null ? "" : ", \"error\": " + AESBridge.S(error.Length > 300 ? error.Substring(0, 300) : error)) + "}";
+        int Fail(string reason, string error, int? index = null)
+        {
+            foreach (string p in new[] { outPath, jsonPath })
+                try { if (File.Exists(p)) File.Delete(p); } catch { }
+            Console.WriteLine(Result(false, reason, index, error, 0));
+            return 0;
+        }
+
+        List<Dictionary<string, object>> changes;
+        try { changes = ReadChanges(File.ReadAllText(changesPath), out _); }
+        catch (Exception ex) { return Fail("bad_input", "changes: " + ex.Message); }
+        if (changes.Count == 0) return Fail("bad_input", "no changes");
+
+        byte[] input;
+        try { input = File.ReadAllBytes(inPath); }
+        catch (Exception ex) { return Fail("load_failed", ex.GetType().Name + ": " + ex.Message); }
+        if (input.Length < 8) return Fail("load_failed", "not a scheduler file");
+        version = BitConverter.ToInt32(input, 0);
+        if (version > supported) return Fail("refused_format", "format newer than this AES assembly");
+        if (version <= 0) return Fail("load_failed", "not a scheduler format version");
+
+        try
+        {
+            SchedulerFile sf, original;
+            try { sf = SchedulerFile.Load(input); original = SchedulerFile.Load(input); }
+            catch (Exception ex) { return Fail("load_failed", ex.GetType().Name + ": " + ex.Message); }
+            Dictionary<string, string> before = Snapshot(original);
+
+            // The keys a change may alter: its match, or every slot of the plays it touches.
+            var targets = new List<string>();
+            for (int i = 0; i < changes.Count; i++)
+            {
+                string error;
+                try
+                {
+                    targets.AddRange(Targets(sf, changes[i]));
+                    error = Apply(sf, changes[i]);
+                }
+                catch (Exception ex) { error = ex.Message; }
+                if (error != null) return Fail("rejected", error, i);
+            }
+
+            Dictionary<string, string> edited = Snapshot(sf);
+            var unexpected = edited.Keys.Union(before.Keys)
+                .Where(k => !k.Contains(" text") && Get(before, k) != Get(edited, k) && !targets.Any(t => k.StartsWith(t, StringComparison.Ordinal)))
+                .OrderBy(k => k, StringComparer.Ordinal).ToList();
+            if (unexpected.Count > 0)
+                return Fail("verify_failed", "changed outside the batch: " +
+                    string.Join("; ", unexpected.Take(5).Select(k => $"{k}: {Get(before, k)} -> {Get(edited, k)}")));
+
+            sf.Save(outPath);
+            SchedulerFile reloaded = SchedulerFile.Load(File.ReadAllBytes(outPath));
+            Dictionary<string, string> after = Snapshot(reloaded);
+            var lost = edited.Keys.Union(after.Keys).Where(k => Get(edited, k) != Get(after, k)).OrderBy(k => k, StringComparer.Ordinal).ToList();
+            if (lost.Count > 0)
+                return Fail("verify_failed", "the saved file differs from the edited model: " +
+                    string.Join("; ", lost.Take(5).Select(k => $"{k}: {Get(edited, k)} vs {Get(after, k)}")));
+
+            File.WriteAllText(jsonPath, AESBridge.BuildJson(reloaded), System.Text.Encoding.UTF8);
+            int changedCount = before.Keys.Union(after.Keys).Count(k => Get(before, k) != Get(after, k));
+            Console.WriteLine(Result(true, null, null, null, changedCount));
+            return 0;
+        }
+        catch (Exception ex) { return Fail("error", ex.GetType().Name + ": " + ex.Message); }
+    }
+
+    // Snapshot key prefixes a change may alter (see Snapshot): "match <id> " for a move or score, "play <id> slot " for
+    // each play whose slots a finish or reseed sets.
+    static IEnumerable<string> Targets(SchedulerFile sf, Dictionary<string, object> c)
+    {
+        switch (Str(c, "op"))
+        {
+            case "move":
+            case "score":
+                return new[] { $"match {Int(c, "match")} " };
+            case "finish":
+                return new[] { $"play {Int(c, "play")} slot " };
+            case "reseed":
+            case "reseed-flag":
+            {
+                Round round = null;
+                if (c.ContainsKey("play")) round = sf.GetPlayByID(Int(c, "play"))?.OwningGroup?.OwningRound;
+                else if (c.ContainsKey("round"))
+                {
+                    int roundId = Int(c, "round");
+                    round = sf.Event.Divisions.SelectMany(d => d.Rounds).FirstOrDefault(x => x.RoundID == roundId);
+                }
+                return round == null ? new string[0] : round.Plays.Select(p => $"play {p.PlayID} slot ").ToArray();
+            }
+            default:
+                return new string[0];
+        }
+    }
+
     // ── changes ────────────────────────────────────────────────────────────
 
     static List<Dictionary<string, object>> ReadChanges(string json, out bool force)
@@ -237,23 +360,7 @@ static class HostBatch
                 string op = $"move:{Int(c, "match")}={Str(c, "court")}@{Str(c, "start")}";
                 return VsfEditTool.Apply(sf, op, new List<Func<SchedulerFile, string>>());
             }
-            case "score":
-            {
-                if (!(c.TryGetValue("sets", out object s) && s is object[] sets) || sets.Length == 0) return "\"sets\" must be [[ft, st], ...]";
-                var parts = new List<string>();
-                foreach (object set in sets)
-                {
-                    if (!(set is object[] pair) || pair.Length != 2 || !(pair[0] is int ft) || !(pair[1] is int st))
-                        return "each set must be [ft, st]";
-                    parts.Add($"{ft}-{st}");
-                }
-                int id = Int(c, "match");
-                string error = VsfEditTool.Apply(sf, $"score:{id}={string.Join(",", parts)}", new List<Func<SchedulerFile, string>>());
-                if (error != null) return error;
-                Match m = sf.GetMatchByID(id);
-                return m.Sets.Take(parts.Count).Select(x => $"{x.FirstTeamScore}-{x.SecondTeamScore}").SequenceEqual(parts)
-                    ? null : "AES did not keep the sets";
-            }
+            case "score": return Score(sf, c);
             case "finish": return Finish(sf, c);
             case "reseed": return Reseed(sf, c);
             case "reseed-flag":
@@ -268,6 +375,69 @@ static class HostBatch
             }
             default: return $"unknown op '{Str(c, "op")}'";
         }
+    }
+
+    // A MatchData payload, the one AES's own score entry sends, through UpdateWithRemoteEntryData: outcome, sets and
+    // LastScoreDateTimeEntered change together, and the match's work team is sent back unchanged (AES overwrites it).
+    // "outcome" (FirstTeamWon, SecondTeamWon or Tie) is optional; without it the winner comes from the sets. The sets
+    // given replace all of the match's sets (AES clears any slot past them).
+    static string Score(SchedulerFile sf, Dictionary<string, object> c)
+    {
+        int id = Int(c, "match");
+        Match m = sf.GetMatchByID(id);
+        if (m == null) return $"no match {id}";
+        if (!(c.TryGetValue("sets", out object s) && s is object[] sets) || sets.Length == 0) return "\"sets\" must be [[ft, st], ...]";
+        var pairs = new List<int[]>();
+        foreach (object set in sets)
+        {
+            if (!(set is object[] pair) || pair.Length != 2 || !(pair[0] is int ft) || !(pair[1] is int st) || ft < 0 || st < 0 || ft > 199 || st > 199)
+                return "each set must be [ft, st], 0 to 199";
+            pairs.Add(new[] { ft, st });
+        }
+        if (pairs.Count > m.Sets.Length) return $"match {id} has only {m.Sets.Length} set(s)";
+        int won1 = pairs.Count(p => p[0] > p[1]), won2 = pairs.Count(p => p[1] > p[0]);
+        Match.OutcomeType outcome;
+        if (c.TryGetValue("outcome", out object o) && o != null)
+        {
+            if (!(o is string name) || !new[] { "FirstTeamWon", "SecondTeamWon", "Tie" }.Contains(name))
+                return "\"outcome\" must be FirstTeamWon, SecondTeamWon or Tie";
+            outcome = (Match.OutcomeType)Enum.Parse(typeof(Match.OutcomeType), name);
+            if ((outcome == Match.OutcomeType.FirstTeamWon && won1 <= won2) || (outcome == Match.OutcomeType.SecondTeamWon && won2 <= won1)
+                || (outcome == Match.OutcomeType.Tie && won1 != won2))
+                return $"outcome {name} doesn't match the sets ({won1}-{won2})";
+        }
+        else
+        {
+            if (won1 == won2) return "no winner from those sets";
+            outcome = won1 > won2 ? Match.OutcomeType.FirstTeamWon : Match.OutcomeType.SecondTeamWon;
+        }
+        var payload = new List<string>
+        {
+            sf.FileID.ToString(), MatchDataType.ToString(CultureInfo.InvariantCulture),
+            id.ToString(CultureInfo.InvariantCulture), ((int)outcome).ToString(CultureInfo.InvariantCulture),
+            m.WorkTeamNumber.ToString(CultureInfo.InvariantCulture), ((int)m.TypeOfWorkTeam).ToString(CultureInfo.InvariantCulture),
+        };
+        foreach (int[] p in pairs)
+        {
+            payload.Add(p[0].ToString(CultureInfo.InvariantCulture));
+            payload.Add(p[1].ToString(CultureInfo.InvariantCulture));
+        }
+        if (sf.UpdateWithRemoteEntryData(payload.ToArray()) == null) return "AES did not apply the score";
+        return ScoreHolds(sf.GetMatchByID(id), outcome, pairs);
+    }
+
+    static string ScoreHolds(Match m, Match.OutcomeType outcome, List<int[]> pairs)
+    {
+        if (m == null) return "the match is gone";
+        if (m.TypeOfOutcome != outcome) return $"outcome is {m.TypeOfOutcome}, not {outcome}";
+        Match.Set[] sets = m.Sets;
+        for (int i = 0; i < sets.Length; i++)
+        {
+            int? ft = i < pairs.Count ? pairs[i][0] : (int?)null, st = i < pairs.Count ? pairs[i][1] : (int?)null;
+            if (sets[i].FirstTeamScore != ft || sets[i].SecondTeamScore != st)
+                return $"set {i + 1} is {Show(sets[i].FirstTeamScore)}-{Show(sets[i].SecondTeamScore)}";
+        }
+        return null;
     }
 
     static string Finish(SchedulerFile sf, Dictionary<string, object> c)
