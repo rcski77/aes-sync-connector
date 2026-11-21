@@ -54,6 +54,9 @@ class AESBridge
             // The only mode that opens a network connection; asks for the AES login at the console.
             if (args.Length >= 1 && args[0] == "--publish")
                 return Publish.Run(args.Skip(1).ToArray());
+            // --publish-json: Relay Sync's sign-in check and publish; the login comes on stdin as JSON (Publish.cs).
+            if (args.Length >= 1 && args[0] == "--publish-json")
+                return Publish.RunJson(args.Skip(1).ToArray());
 
             // --host-batch / --plays: headless host-loop spike (HostBatch.cs). Never touches the network.
             if (args.Length >= 1 && args[0] == "--host-batch")

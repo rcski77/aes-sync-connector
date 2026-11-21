@@ -13,7 +13,8 @@ Usage:  python aes_monitor.py
 
 import os, sys, socket, struct, hashlib, base64, gzip, zlib, glob
 import subprocess, json, datetime, threading, time, re, queue
-import configparser, urllib.request, urllib.error
+import configparser, urllib.request, urllib.error, urllib.parse
+import shutil, getpass
 import xml.etree.ElementTree as ET
 
 try:
@@ -1403,7 +1404,25 @@ def diff(prev, curr):
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 def ts(): return datetime.datetime.now().strftime('%H:%M:%S')
-def log(msg): print(f"  [{ts()}] {msg}")
+
+# While the AES sign-in prompt is open (AesSignIn), log lines wait here instead of printing over it.
+_log_lock = threading.Lock()
+_log_held = None  # a list while held, else None
+
+def log(msg):
+    line = f"  [{ts()}] {msg}"
+    with _log_lock:
+        if _log_held is not None:
+            _log_held.append(line)
+            return
+    print(line)
+
+def _hold_log(hold):
+    global _log_held
+    with _log_lock:
+        held, _log_held = _log_held, ([] if hold else None)
+    for line in (held or []) if not hold else []:
+        print(line)
 
 def show_update(data, raw_size, n, changes):
     print(f"\n{'═'*62}")
@@ -1422,29 +1441,40 @@ def show_update(data, raw_size, n, changes):
     print(f"{'─'*62}")
 
 
-# ── Relay hosting (read-only) ───────────────────────────────────────────────────
+# ── Relay hosting ───────────────────────────────────────────────────
 # docs/plans/relay-hosting-plan.md in the dashboard repo (phase 1), ADR-023. With the event's "Host in Relay"
 # switch on (Settings screen) and exactly one .vsf in this folder (next to the config file), Relay Sync stops
 # connecting to AES and feeds the dashboard from the file instead: it checks the file through the bridge
 # (--vsf: format, then the file's AES event key must be this connector key's event), then posts /snapshot from
 # it exactly as from AES's push, on start, whenever the file changes, and every SNAPSHOT_INTERVAL. Every
-# HOSTING_CHECK_INTERVAL seconds it reports its hosting state to /hosting and reads the switch back. No edits,
-# no publishing, and no connection to AES's servers. The file never leaves the laptop: only its name, format
-# and the state are reported. Anything short of "hosting" leaves the AES sync running as before.
+# HOSTING_CHECK_INTERVAL seconds it reports its hosting state to /hosting and reads the switch back. Publishing
+# to AES's results site is phase 2 (RelayPublisher, below); there are no edits from the dashboard yet. The file
+# never reaches Relay's servers: only its name, format and the state are reported. Anything short of "hosting"
+# leaves the AES sync running as before.
 
 HOSTING_CHECK_INTERVAL = 10   # seconds between folder checks / /hosting reports
 HOSTING_SETTLE_SECONDS = 2    # a .vsf modified more recently than this is still being written; check next time
 
 
+RELAY_LATEST_SUFFIX = ' (Relay latest).vsf'  # written next to the dropped file when hosting stops
+
+
+def relay_latest_name(path):
+    """'<file name> (Relay latest).vsf' for a dropped file's path."""
+    return os.path.splitext(os.path.basename(path))[0] + RELAY_LATEST_SUFFIX
+
+
 def find_vsf_files(folder=None):
-    """The .vsf files directly in the Relay Sync folder (not data/ or app/), sorted."""
+    """The .vsf files directly in the Relay Sync folder (not data/ or app/), sorted. Skips the
+    '(Relay latest).vsf' files Relay Sync writes itself when hosting stops: they are never a second file."""
     folder = folder or _BASE_DIR
     try:
         names = os.listdir(folder)
     except OSError:
         return []
     return sorted(os.path.join(folder, n) for n in names
-                  if n.lower().endswith('.vsf') and os.path.isfile(os.path.join(folder, n)))
+                  if n.lower().endswith('.vsf') and not n.lower().endswith(RELAY_LATEST_SUFFIX.lower())
+                  and os.path.isfile(os.path.join(folder, n)))
 
 
 def load_vsf(path, bridge_exe):
@@ -1509,6 +1539,15 @@ class RelayHost:
         self.last_snapshot = None
         self.last_line = None         # the last status line printed, so only changes are logged
         self.report_failed = False
+        # Phase 2 (publishing). From the /hosting answer: the director's interval and the Publish now stamp.
+        self.publish_interval = PUBLISH_INTERVAL_DEFAULT
+        self.publish_now_requested = None
+        self.publisher = None         # RelayPublisher, set by monitor(); adds its state to the report
+        # The latest version, kept in data/ while hosting (phase 2: the dropped file as last loaded). It is what
+        # gets published and what is written next to the dropped file as '(Relay latest).vsf' when hosting stops.
+        self.latest_path = os.path.join(DATA_DIR, 'relay_latest.vsf')
+        self.lock = threading.Lock()
+        self.current = None           # {'path', 'data', 'key'} of the hosted file, for the publisher thread
 
     def _say(self, line):
         if line != self.last_line:
@@ -1576,6 +1615,7 @@ class RelayHost:
                               f"{len(matches)} matches ({sum(1 for m in matches if m.get('decided'))} decided), "
                               f"{len(data.get('pools', []))} pools, {len(data.get('brackets', []))} brackets, "
                               f"{len(data.get('courts', []))} courts. AES sync paused.")
+                    self._keep_latest(path, data)
                     self.hosting.set()
                     self.last_snapshot = None  # push now
                 report['hostingSince'] = _utc_iso_ms(self.hosting_since)
@@ -1585,12 +1625,46 @@ class RelayHost:
                     self.last_snapshot = now
 
         if state != 'hosting' and self.hosting.is_set():
-            self.hosting.clear()
-            self.hosting_since = None
-            self.last_snapshot = None
+            self.stop_hosting()
             log("Hosting: stopped - going back to syncing from AES.")
         report['state'] = state
+        report.update(self.publisher.report_fields() if self.publisher and state == 'hosting'
+                      else RelayPublisher.empty_fields())
         return report
+
+    def _keep_latest(self, path, data):
+        """Copy the hosted file to data/ as the latest version, and remember what the publisher needs."""
+        ensure_data_dir()
+        tmp = self.latest_path + '.tmp'
+        shutil.copyfile(path, tmp)
+        os.replace(tmp, self.latest_path)
+        with self.lock:
+            self.current = {'path': path, 'data': data, 'key': self.event_key}
+
+    def hosted(self):
+        """{'path', 'data', 'key'} of the file being hosted, or None."""
+        with self.lock:
+            return dict(self.current) if self.current and self.hosting.is_set() else None
+
+    def stop_hosting(self):
+        """Stop hosting (switch off, file gone, Relay Sync closing): write the latest version next to the
+        dropped file as '<file name> (Relay latest).vsf' (the folder check skips it), then clear."""
+        if not self.hosting.is_set():
+            return
+        with self.lock:
+            current, self.current = self.current, None
+        self.hosting.clear()
+        self.hosting_since = None
+        self.last_snapshot = None
+        if current and os.path.exists(self.latest_path):
+            dest = os.path.join(os.path.dirname(current['path']), relay_latest_name(current['path']))
+            try:
+                tmp = dest + '.tmp'
+                shutil.copyfile(self.latest_path, tmp)
+                os.replace(tmp, dest)
+                log(f"Hosting: wrote the latest version as \"{os.path.basename(dest)}\". Open it in AES to carry on there.")
+            except OSError as e:
+                log(f"Hosting: couldn't write \"{os.path.basename(dest)}\": {e}")
 
     def report(self, report):
         """POST the report; adopt the switch and event key from the answer. Returns True if either changed."""
@@ -1611,6 +1685,9 @@ class RelayHost:
         self.report_failed = False
         switch_on = answer.get('hostInRelay') is True
         event_key = answer.get('aesEventIdKey') or None
+        self.publish_interval = clamp_publish_interval(answer.get('publishIntervalMinutes'))
+        stamp = answer.get('publishNowRequestedAt')
+        self.publish_now_requested = stamp if isinstance(stamp, str) and stamp else None
         changed = switch_on != self.switch_on or event_key != self.event_key
         self.switch_on, self.event_key = switch_on, event_key
         return changed
@@ -1629,6 +1706,475 @@ class RelayHost:
             except Exception as e:
                 log(f"Hosting check error: {e}")
             stop_event.wait(HOSTING_CHECK_INTERVAL)
+
+
+# ── Relay hosting: AES sign-in and publishing (phase 2) ────────────────────────
+# While hosting, Relay Sync publishes the hosted file to AES's results site the way AES desktop's "Auto Update"
+# does: every N minutes (the director's setting on the dashboard, 3-60, default 3) whether or not anything changed,
+# the first time right after hosting starts and the sign-in is good, then on the timer only. "Publish now" on the
+# dashboard comes back on the /hosting answer (publishNowRequestedAt), which Relay Sync reads every 10 seconds
+# while hosting; the outbox isn't polled while hosting (no AES connection, write-back off).
+#
+# The AES email and password are typed at this console, checked with AES, and saved encrypted for this Windows
+# user (DPAPI) in data/aes_login.dat. They go to the bridge on stdin only (AESBridge.exe --publish-json), never on a
+# command line, in the environment, in a log line or in a report.
+#
+# After each publish Relay Sync reads the event back from AES's public results API (/courts/{date}/240, once per
+# event date) and checks the matches' courts, teams and outcomes against what it published. Before each timed
+# publish it reads it again: if the online event no longer matches Relay's last (confirmed) publish, someone else
+# published it (AES desktop's Auto Update, usually). It stops auto-publishing and reports it; Publish now resumes.
+
+PUBLISH_INTERVAL_DEFAULT = 3   # minutes, as AES desktop's Auto Update
+PUBLISH_INTERVAL_MIN = 3
+PUBLISH_INTERVAL_MAX = 60
+READBACK_DELAY = 30            # seconds after a publish before reading the event back
+READBACK_RETRY_DELAY = 60      # once more, this much later, if the first read-back didn't match yet
+AES_RESULTS_API = 'https://results.advancedeventsystems.com/api/event/'
+AES_LOGIN_FILE = os.path.join(DATA_DIR, 'aes_login.dat')
+_DPAPI_ENTROPY = b'Relay Sync AES login v1'
+
+
+def clamp_publish_interval(value):
+    """The dashboard's interval in whole minutes, clamped to 3-60; the default for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return PUBLISH_INTERVAL_DEFAULT
+    return max(PUBLISH_INTERVAL_MIN, min(PUBLISH_INTERVAL_MAX, int(value)))
+
+
+# DPAPI (CryptProtectData for the current Windows user), through ctypes so no extra package is needed.
+def _dpapi(data, protect):
+    import ctypes
+    from ctypes import wintypes
+
+    class BLOB(ctypes.Structure):
+        _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_char))]
+
+    def blob(b):
+        buf = ctypes.create_string_buffer(b, len(b))
+        return BLOB(len(b), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), buf
+
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    src, _keep1 = blob(data)
+    ent, _keep2 = blob(_DPAPI_ENTROPY)
+    out = BLOB()
+    CRYPTPROTECT_UI_FORBIDDEN = 0x1
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    if protect:
+        ok = fn(ctypes.byref(src), 'Relay Sync AES login', ctypes.byref(ent), None, None,
+                CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(out))
+    else:
+        ok = fn(ctypes.byref(src), None, ctypes.byref(ent), None, None, CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(out))
+    if not ok:
+        raise OSError(f"DPAPI failed ({ctypes.GetLastError()})")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        kernel32.LocalFree(out.pbData)
+
+
+def load_aes_login():
+    """(email, password) from data/aes_login.dat, or None (none saved, or another Windows user's file)."""
+    try:
+        with open(AES_LOGIN_FILE, 'rb') as f:
+            raw = f.read()
+        login = json.loads(_dpapi(raw, protect=False).decode('utf-8'))
+        if login.get('email') and login.get('password'):
+            return login['email'], login['password']
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        log(f"Saved AES login can't be read ({type(e).__name__}); you'll be asked to sign in again.")
+    return None
+
+
+def save_aes_login(email, password):
+    ensure_data_dir()
+    raw = _dpapi(json.dumps({'email': email, 'password': password}).encode('utf-8'), protect=True)
+    tmp = AES_LOGIN_FILE + '.tmp'
+    with open(tmp, 'wb') as f:
+        f.write(raw)
+    os.replace(tmp, AES_LOGIN_FILE)
+
+
+def forget_aes_login():
+    """Delete the saved login. Returns True if there was one."""
+    try:
+        os.remove(AES_LOGIN_FILE)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def bridge_aes(bridge_exe, request):
+    """Run AESBridge.exe --publish-json with `request` (holding the login) on stdin. Returns its result line
+    ({'ok', 'result', 'bytes', 'detail'}). Never logs the request."""
+    try:
+        ensure_data_dir()
+        # cwd data/: AES's connection class writes its own errors.log into the working folder.
+        r = subprocess.run([bridge_exe, '--publish-json'], input=json.dumps(request).encode('utf-8'),
+                           capture_output=True, timeout=150, cwd=DATA_DIR)
+        lines = [l for l in r.stdout.decode('utf-8', 'replace').splitlines() if l.strip().startswith('{')]
+        if lines:
+            return json.loads(lines[-1])
+        return {'ok': False, 'result': 'error', 'detail': f'no answer from the bridge (exit {r.returncode})'}
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'result': 'no_answer', 'detail': 'the bridge timed out'}
+    except Exception as e:
+        return {'ok': False, 'result': 'error', 'detail': type(e).__name__}
+
+
+# ── Read-back ──
+# A "view" is what AES's public site shows for the event, per match: {matchId: (court, hasOutcome, team1, team2)}.
+# The expected view comes from the hosted file's parse; the online one from /courts/{date}/240. AES shows a team as
+# "<name> (<seed or region>)", so a team matches when the online text is ours, or ours plus a " (...)" suffix.
+
+def event_dates(tournament_data):
+    """The dates (yyyy-mm-dd) that have matches on a court."""
+    return sorted({m['startTime'][:10] for m in (tournament_data or {}).get('matches', [])
+                   if m.get('courtName') and isinstance(m.get('startTime'), str) and len(m['startTime']) >= 10})
+
+
+def expected_view(tournament_data):
+    return {m['matchId']: (m.get('courtName') or '', bool(m.get('decided')), m.get('team1') or '', m.get('team2') or '')
+            for m in (tournament_data or {}).get('matches', [])
+            if m.get('courtName') and isinstance(m.get('startTime'), str)}
+
+
+def fetch_online_view(key, dates, timeout=20):
+    """The online view across `dates` (one GET per date), or None if AES's API can't be read."""
+    view = {}
+    for d in dates:
+        url = f"{AES_RESULTS_API}{urllib.parse.quote(key, safe='')}/courts/{d}/240"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Relay Sync', 'Accept': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode('utf-8') or 'null') or {}
+        except Exception:
+            return None
+        for court in body.get('CourtSchedules') or []:
+            for m in court.get('CourtMatches') or []:
+                if isinstance(m.get('MatchId'), int):
+                    view[m['MatchId']] = (court.get('Name') or '', bool(m.get('HasOutcome')),
+                                          m.get('FirstTeamText') or '', m.get('SecondTeamText') or '')
+    return view
+
+
+def _team_matches(online, ours):
+    if not ours:
+        return True  # an unresolved slot: AES shows its own placeholder text
+    return online == ours or (online.startswith(ours + ' (') and online.endswith(')'))
+
+
+def view_differences(online, expected):
+    """How many matches differ between the online view and the expected one (missing, extra or changed)."""
+    n = len(set(online) ^ set(expected))
+    for mid in set(online) & set(expected):
+        oc, oo, o1, o2 = online[mid]
+        ec, eo, e1, e2 = expected[mid]
+        if oc != ec or oo != eo or not _team_matches(o1, e1) or not _team_matches(o2, e2):
+            n += 1
+    return n
+
+
+class RelayPublisher:
+    """Publishes the hosted file on its own thread (a publish can take a minute; the 10-second report must go on)."""
+
+    def __init__(self, host, bridge_exe):
+        self.host = host
+        self.bridge_exe = bridge_exe
+        self.signin = None              # AesSignIn, set by monitor()
+        self.lock = threading.Lock()
+        self.signed_in = load_aes_login() is not None
+        self.reset()
+
+    def reset(self):
+        """Per-hosting state; called when hosting starts or stops."""
+        with self.lock:
+            self.hosting_key = None       # the hosted path this state belongs to
+            self.last_publish_at = None
+            self.last_result = None       # the bridge's result word
+            self.next_publish_at = None
+            self.published_view = None    # the expected view of the last successful publish
+            self.read_back = None         # 'match' | 'differs' | 'unavailable'
+            self.confirmed = False        # the read-back after the last publish matched
+            self.other_publisher_at = None
+            self.publishing = False
+            self.publish_now_handled = self.host.publish_now_requested  # an old request isn't a new one
+
+    @staticmethod
+    def empty_fields():
+        return {'signedIn': None, 'publishing': None, 'publishIntervalMinutes': None, 'lastPublishAt': None,
+                'lastPublishResult': None, 'nextPublishAt': None, 'readBack': None, 'otherPublisherAt': None,
+                'publishNowHandled': None}
+
+    def report_fields(self):
+        """The publish state for the /hosting report (never the email)."""
+        with self.lock:
+            return {
+                'signedIn': self.signed_in,
+                'publishing': self.publishing,
+                'publishIntervalMinutes': self.host.publish_interval,
+                'lastPublishAt': _utc_iso_ms(self.last_publish_at) if self.last_publish_at else None,
+                'lastPublishResult': self.last_result,
+                'nextPublishAt': _utc_iso_ms(self.next_publish_at) if self.next_publish_at else None,
+                'readBack': self.read_back,
+                'otherPublisherAt': _utc_iso_ms(self.other_publisher_at) if self.other_publisher_at else None,
+                'publishNowHandled': self.publish_now_handled,
+            }
+
+    def _set(self, **kw):
+        with self.lock:
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    def run(self, stop_event):
+        while not stop_event.is_set():
+            try:
+                self.step(stop_event)
+            except Exception as e:
+                log(f"Publish error: {type(e).__name__}: {e}")
+                self._set(publishing=False)
+            stop_event.wait(1)
+
+    def step(self, stop_event):
+        hosted = self.host.hosted()
+        if not hosted:
+            if self.hosting_key is not None:
+                self.reset()
+            return
+        if self.hosting_key != hosted['path']:
+            self.reset()
+            self._set(hosting_key=hosted['path'])
+        if not self.signed_in:
+            if self.signin:
+                self.signin.request()
+            return
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        requested = self.host.publish_now_requested
+        publish_now = requested is not None and requested != self.publish_now_handled
+        # The next timed publish: the last attempt plus the interval (which the director may have changed since);
+        # none while paused for another publisher.
+        if self.last_publish_at:
+            due = None if self.other_publisher_at else \
+                self.last_publish_at + datetime.timedelta(minutes=self.host.publish_interval)
+            if due != self.next_publish_at:
+                self._set(next_publish_at=due)
+        if publish_now:
+            kind = 'now'
+        elif self.last_result is None:
+            kind = 'first'
+        elif self.other_publisher_at is None and self.next_publish_at and now >= self.next_publish_at:
+            kind = 'timed'
+        else:
+            return
+        self.cycle(hosted, kind, requested, stop_event)
+
+    def cycle(self, hosted, kind, requested, stop_event):
+        key = hosted['key']
+        dates = event_dates(hosted['data'])
+        if kind == 'timed' and self.confirmed and self.published_view is not None:
+            online = fetch_online_view(key, dates)
+            if online is not None and view_differences(online, self.published_view):
+                at = datetime.datetime.now(datetime.timezone.utc)
+                self._set(other_publisher_at=at, next_publish_at=None)  # read_back stays about Relay's own publish
+                log("Publish: the event online has changed since Relay's last publish - someone else published it "
+                    "(AES desktop's Auto Update?). Auto-publish is paused; turn that off, then Publish now on the dashboard.")
+                return
+
+        login = load_aes_login()
+        if not login:
+            self._set(signed_in=False)
+            return
+        started = datetime.datetime.now(datetime.timezone.utc)
+        self._set(publishing=True, publish_now_handled=requested)
+        log(f"Publish: {'publishing now (dashboard)' if kind == 'now' else 'publishing'} to AES ...")
+        result = bridge_aes(self.bridge_exe, {'action': 'publish', 'email': login[0], 'password': login[1],
+                                              'file': self.host.latest_path, 'key': key, 'forceResultsImport': False})
+        login = None
+        word = result.get('result') or 'error'
+        interval = datetime.timedelta(minutes=self.host.publish_interval)
+        self._set(publishing=False, last_publish_at=started, last_result=word, next_publish_at=started + interval)
+        if word == 'published':
+            log(f"Publish: AES accepted it ({result.get('bytes', 0):,} bytes). Next at "
+                f"{(started + interval).astimezone().strftime('%H:%M')}.")
+            self._set(other_publisher_at=None, published_view=expected_view(hosted['data']), confirmed=False,
+                      read_back=None)
+            self.read_back_after(key, dates, stop_event)
+            return
+        if word == 'sign_in_invalid':
+            forget_aes_login()
+            self._set(signed_in=False)
+            if self.signin:
+                self.signin.skipped = False
+            log("Publish: AES didn't accept the saved login. Sign in again at this window.")
+            return
+        log(f"Publish: failed ({word}{': ' + result['detail'] if result.get('detail') else ''}). "
+            f"Trying again at {(started + interval).astimezone().strftime('%H:%M')}.")
+
+    def read_back_after(self, key, dates, stop_event):
+        """Read the event back from AES and check it against what was just published."""
+        for delay in (READBACK_DELAY, READBACK_RETRY_DELAY):
+            if stop_event.wait(delay) or not self.host.hosted():
+                return
+            online = fetch_online_view(key, dates)
+            if online is None:
+                self._set(read_back='unavailable')
+                continue
+            n = view_differences(online, self.published_view or {})
+            if n == 0:
+                self._set(read_back='match', confirmed=True)
+                log(f"Publish: read back from AES's results site; {len(online)} matches match.")
+                return
+            self._set(read_back='differs')
+        if self.read_back == 'differs':
+            log("Publish: AES's results site doesn't show what was published yet.")
+        elif self.read_back == 'unavailable':
+            log("Publish: couldn't read the event back from AES's results site.")
+
+
+class AesSignIn:
+    """The console side: asks for the AES login when the publisher needs one, and watches for the F key (forget the
+    saved login). Runs on its own thread; the prompt holds log lines back so they don't print over it."""
+
+    def __init__(self, publisher, bridge_exe):
+        self.publisher = publisher
+        self.bridge_exe = bridge_exe
+        self.wanted = threading.Event()
+        self.skipped = False   # Enter with no email: don't ask again until S is pressed or hosting restarts
+        self.console = _has_console_input()
+        self.warned = False
+
+    def request(self):
+        if not self.skipped:
+            self.wanted.set()
+        if not self.console and not self.warned:
+            log("Publish: not signed in to AES, and there's no console window to sign in from.")
+            self.warned = True
+
+    def run(self, stop_event):
+        if not self.console:
+            return
+        import msvcrt
+        _enable_vt()
+        while not stop_event.is_set():
+            if self.wanted.is_set() and not self.publisher.signed_in:
+                self.wanted.clear()
+                self.prompt()
+                continue
+            self.wanted.clear()
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch().lower()
+                if ch == 'f':
+                    self.forget()
+                elif ch == 's' and not self.publisher.signed_in:
+                    self.skipped = False
+                    self.prompt()
+            stop_event.wait(0.2)
+
+    def forget(self):
+        self.skipped = True  # first, so the publisher doesn't ask for a sign-in in between
+        had = forget_aes_login()
+        self.publisher._set(signed_in=False)
+        log("Publish: forgot the saved AES login." if had else "Publish: no AES login was saved.")
+        log("Publish: press S to sign in.")
+
+    def prompt(self):
+        """Ask until AES accepts the login or the director skips. Every line the prompt printed (the typed email
+        among them) is cleared from the window afterwards; one outcome line is left."""
+        _hold_log(True)
+        lines = 0
+        outcome = None
+        try:
+            print("\n  AES sign-in, to publish this event to AES's results site.")
+            print("  Saved encrypted for this Windows user on this computer only. Enter with no email skips.")
+            lines = 3
+            while True:
+                email = input("  AES email: ").strip()
+                lines += 1
+                if not email:
+                    self.skipped = True
+                    outcome = "Publish: AES sign-in skipped. Press S to sign in."
+                    return
+                password = getpass.getpass("  AES password: ")
+                print("  Checking with AES ...")
+                lines += 2
+                result = bridge_aes(self.bridge_exe, {'action': 'signin', 'email': email, 'password': password})
+                word = result.get('result')
+                if word == 'signed_in':
+                    save_aes_login(email, password)
+                    email = password = None
+                    self.skipped = False
+                    self.publisher._set(signed_in=True)
+                    outcome = "Publish: signed in to AES. Press F to forget the saved login."
+                    return
+                email = password = None
+                if word == 'sign_in_invalid':
+                    print("  AES didn't accept that email and password. Try again.")
+                else:
+                    print(f"  Couldn't check the sign-in with AES ({word}). Try again, or Enter to skip.")
+                lines += 1
+        except (EOFError, KeyboardInterrupt):
+            self.skipped = True
+            outcome = "Publish: AES sign-in cancelled. Press S to sign in."
+        finally:
+            _erase_lines(lines)
+            _hold_log(False)
+            if outcome:
+                log(outcome)
+
+
+def _has_console_input():
+    """True when stdin is a real Windows console (isatty() is also true for NUL, so ask the console itself)."""
+    if os.name != 'nt' or sys.stdin is None:
+        return False
+    try:
+        import ctypes, msvcrt
+        mode = ctypes.c_uint32()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(msvcrt.get_osfhandle(sys.stdin.fileno()), ctypes.byref(mode)))
+    except Exception:
+        return False
+
+
+def _enable_vt():
+    """Let the console take the escape codes _erase_lines uses (Windows 10+)."""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if k.GetConsoleMode(h, ctypes.byref(mode)):
+            k.SetConsoleMode(h, mode.value | 0x0004)
+    except Exception:
+        pass
+
+
+def _erase_lines(n):
+    """Clear the last n lines of the console, so the typed email doesn't stay on screen."""
+    if n <= 0:
+        return
+    sys.stdout.write(f"\x1b[{n}F\x1b[J")
+    sys.stdout.flush()
+
+
+def _on_console_close(relay_host):
+    """Write the '(Relay latest)' file when the console window is closed (Windows gives a few seconds)."""
+    if os.name != 'nt':
+        return
+    import ctypes
+    from ctypes import wintypes
+    HANDLER = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+    def handler(event):
+        if event in (2, 5, 6):  # CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT
+            try:
+                relay_host.stop_hosting()
+            except Exception:
+                pass
+        return False
+
+    _on_console_close.handler = HANDLER(handler)  # keep a reference
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(_on_console_close.handler, True)
 
 
 class _HostingStarted(Exception):
@@ -1680,7 +2226,14 @@ def monitor(cfg):
     relay_host = None
     if base_url and ingest_key and bridge_exe:
         relay_host = RelayHost(base_url, ingest_key, timeout, cf_headers, bridge_exe)
-        threading.Thread(target=relay_host.run, args=(threading.Event(),), daemon=True).start()
+        publisher = RelayPublisher(relay_host, bridge_exe)
+        publisher.signin = AesSignIn(publisher, bridge_exe)
+        relay_host.publisher = publisher
+        stop_hosting_threads = threading.Event()
+        threading.Thread(target=relay_host.run, args=(stop_hosting_threads,), daemon=True).start()
+        threading.Thread(target=publisher.run, args=(stop_hosting_threads,), daemon=True).start()
+        threading.Thread(target=publisher.signin.run, args=(stop_hosting_threads,), daemon=True).start()
+        _on_console_close(relay_host)
 
     while True:
         if relay_host and relay_host.hosting.is_set():
@@ -1689,6 +2242,7 @@ def monitor(cfg):
                 while relay_host.hosting.is_set():
                     time.sleep(1)
             except KeyboardInterrupt:
+                relay_host.stop_hosting()
                 log("Shutting down."); break
             continue
         last_snapshot = None  # reset on each new connection → always push snapshot on connect

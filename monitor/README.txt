@@ -26,6 +26,19 @@ Running without AES Scheduler (Host in Relay)
   no file, more than one file, a file for a different event, or a file from a
   newer AES than this Relay Sync opens (download the latest Relay Sync).
   The file stays on this laptop; Relay only gets its name and format.
+
+  Publishing to AES's results site: the first time, Relay Sync asks for your AES
+  email and password in its window. It checks them with AES and keeps them on this
+  laptop, encrypted for your Windows user. It then publishes the event right away
+  and every 3 minutes (change that, or press Publish now, on the Settings screen).
+  Press F in Relay Sync's window to forget the saved login, S to sign in again.
+  If someone else publishes the event (AES Scheduler's Auto Update), Relay Sync
+  stops publishing and the Settings screen says so: turn off Auto Update, then
+  press Publish now.
+
+  When hosting stops (switch off, file removed, Relay Sync closed), Relay Sync
+  saves "<your file> (Relay latest).vsf" next to your file. Open that one in AES
+  Scheduler to carry on there.
   For now, make changes in AES and save the file in this folder. Relay Sync
   picks up the saved file within a few seconds.
 
@@ -33,7 +46,8 @@ Leave the "app" and "data" folders alone. They hold the files Relay Sync needs
 and the working files it creates the first time it runs.
 
 Notes
-  - Keep only one .ini file in this folder, and at most one .vsf file.
+  - Keep only one .ini file in this folder, and at most one .vsf file
+    (the "(Relay latest).vsf" files don't count).
   - Upgrading from an older, flat download? Unzip over the old folder or into a new one.
     Your .ini still works. Old working files left next to the program
     (scheduler_file.bin, tournament_data.json, ...) are ignored and can be deleted.

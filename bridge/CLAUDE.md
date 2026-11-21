@@ -32,8 +32,17 @@ AESBridge.exe --host-batch <in.vsf> <out.vsf> <changes.json> [<payload.bin>]
                                                     # spike: apply a JSON batch, save, recheck, build PostEvent bytes
 AESBridge.exe --plays <in.vsf>                      # spike: list rounds/plays/slots and reseeding teams
 AESBridge.exe --publish <file.vsf> --key <ServerSafeKey> [--force-results-import]
-                                                    # spike: publish to AES's servers like Update Now (asks for the AES login)
+                                                    # by hand: publish to AES's servers like Update Now (asks for the AES login)
+AESBridge.exe --publish-json                        # Relay Sync: sign-in check or publish; one JSON object on stdin, one JSON line out
 ```
+`--publish-json` reads `{"action": "signin"|"publish", "email", "password", "file", "key", "forceResultsImport"}`
+from stdin only (never the command line or the environment) and prints one line `{"ok", "result", "bytes",
+"detail"}` that never holds the credentials. `result`: `signed_in`, `published`, `sign_in_invalid`, `sign_in_failed`,
+`post_failed`, `post_denied`, `bad_command`, `connection_closed`, `no_answer`, `connect_failed`, `version_refused`,
+`error`, or (before connecting) `bad_input`, `load_failed`, `refused_key` (the file's `ServerSafeKey` isn't the
+`key`). Exit 0 for every result, 2 for arguments. "signin" is `AuthenticationCommit` alone (the service answers
+`AuthenticationValid`/`Invalid`/`Failed`, as for the Scheduler's own sign-in). AES's `NetConnection` writes its own
+`errors.log` (stack traces) into the working folder; Relay Sync runs the bridge from `data/`.
 `--vsf` is what Relay Sync's hosting mode calls (monitor/CLAUDE.md, "Relay hosting"). It refuses a format
 newer than `HostBatch.SupportedVersion` (the assembly's `SchedulerFile.CURRENT_VERSION`), loads the file with
 `SchedulerFile.Load`, and writes `<out.json>` through `BuildJson`, the same code the live path uses (so a hosted
@@ -78,7 +87,7 @@ subprocess capture, which would corrupt it).
 | AESBridge.cs | The bridge: parse, decode and encode modes |
 | VsfEditTool.cs | Test modes that save a .vsf through AES's own code (`--roundtrip`, `--edit`, `--ids`) |
 | HostBatch.cs | Headless host-loop spike (`--host-batch`, `--plays`) and the shared format check |
-| Publish.cs | Publish spike (`--publish`): AES's own `NetConnection`, sign-in typed at the console, `PostEvent`. The only mode that opens a network connection; run it by hand, on a test event |
+| Publish.cs | `--publish` (by hand, sign-in typed at the console) and `--publish-json` (Relay Sync, login on stdin): AES's own `NetConnection`, `AuthenticationCommit`, `PostEvent`. The only modes that open a network connection |
 | AESBridge.csproj | .NET 4.8 x86 project |
 | EventScheduler.exe | AES dependency — required at build and runtime |
 | bin/Release/net48/AESBridge.exe | Compiled output |

@@ -88,7 +88,7 @@ All bytes are decrypted via the inbound cipher state before parsing.
 
 ---
 
-## Relay hosting (read-only, phase 1)
+## Relay hosting (phase 1: hosting the file)
 
 The dashboard's `docs/plans/relay-hosting-plan.md` (ADR-023). `RelayHost` in aes_monitor.py runs on its own
 daemon thread from startup (when the config has an endpoint, a key and the bridge was found):
@@ -109,8 +109,43 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
 - `monitor()`'s AES loop checks `relay_host.hosting` every second (the `socket.timeout` branch raises
   `_HostingStarted`), drops the AES connection and waits while hosting. Anything short of `hosting` (switch
   off, file removed, a refused file) clears it and the AES loop reconnects as before.
-- No edits, no publishing, no connection to AES's servers. A dashboard without `/hosting` answers 404: logged
-  once, the switch stays off and the AES sync runs as before.
+- A dashboard without `/hosting` answers 404: logged once, the switch stays off and the AES sync runs as before.
+- The folder check skips `* (Relay latest).vsf`. When hosting stops (`RelayHost.stop_hosting`: switch off, file
+  gone or refused, Ctrl+C, or the console window closed, through a `SetConsoleCtrlHandler` handler) it copies
+  `data/relay_latest.vsf` (the latest version: in phase 2 the dropped file as last loaded) to
+  `<file name> (Relay latest).vsf` next to the dropped file, for AES desktop.
+
+## Relay hosting: AES sign-in and publishing (phase 2)
+
+- **Sign-in** (`AesSignIn`, its own thread, console only): when hosting with no saved login it prompts for the AES
+  email (`input`) and password (`getpass`), holding log lines back meanwhile (`_hold_log`), checks them with
+  `AESBridge.exe --publish-json` `signin`, and on `signed_in` saves them with DPAPI (`CryptProtectData`, current
+  user, ctypes) to `data/aes_login.dat`. The prompt's lines are erased afterwards (VT codes) so the email doesn't
+  stay on screen. Enter with no email skips. Keys: **F** forgets the saved login, **S** signs in. The login goes
+  to the bridge on stdin only (`bridge_aes`), never on a command line, in the environment, a log line or a report.
+  Not a real console (`_has_console_input`: `isatty()` is also true for NUL): no prompt, logged once.
+- **Publishing** (`RelayPublisher`, its own thread, so a publish never holds up the 10-second report): the first
+  publish right after hosting starts and the sign-in is good, then every `publishIntervalMinutes` (from the
+  `/hosting` answer, clamped 3–60, default 3) after the last attempt, whether or not anything changed (AES desktop's
+  Auto Update). Never right after a file change. It publishes `data/relay_latest.vsf` with `key` = the dashboard's
+  `aesEventIdKey`; the bridge refuses a file whose `ServerSafeKey` differs. `sign_in_invalid` deletes the saved
+  login and asks again.
+- **Publish now** comes on the `/hosting` answer as `publishNowRequestedAt`; a stamp different from the last one
+  handled publishes once (and resumes after another publisher), and it is reported back as `publishNowHandled`. Not
+  the outbox: Relay Sync doesn't poll the outbox while hosting (no AES connection, write-back off), while `/hosting`
+  runs every 10 s. A stamp already there when hosting starts counts as handled.
+- **Read-back** (`fetch_online_view`): `GET https://results.advancedeventsystems.com/api/event/{key}/courts/{date}/240`
+  once per event date (`event_dates`), compared per match on court name, `HasOutcome` and both team texts with the
+  hosted parse (`expected_view`, `view_differences`; AES shows a team as "name (seed)", so a " (...)" suffix is
+  allowed). 30 s after a publish, once more 60 s later if it doesn't match yet; `readBack` = `match` / `differs` /
+  `unavailable`.
+- **Another publisher**: before each timed publish, if the last publish was confirmed (`match`) and the online view
+  now differs from it, someone else published. It stops timed publishing (`otherPublisherAt`, no `nextPublishAt`)
+  and waits for Publish now. A change AES's server makes itself (VolleyStation results it imports) would look the
+  same; that's an ADR-023 open question.
+- Report fields (only while `hosting`): `signedIn`, `publishing`, `publishIntervalMinutes`, `lastPublishAt`,
+  `lastPublishResult` (the bridge's word), `nextPublishAt`, `readBack`, `otherPublisherAt`, `publishNowHandled`.
+  Never the email. Contract: the dashboard's `docs/reference/ingest-api.md`, "Relay hosting".
 
 ## AESBridge Invocation
 
