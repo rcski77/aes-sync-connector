@@ -15,3 +15,7 @@ finish_data_out.bin
 
 # Written by build.bat / the Release workflow just before PyInstaller runs
 monitor/_build_info.py
+
+# Event files hold team and official contact details; never commit them
+*.vsf
+*.rvsf

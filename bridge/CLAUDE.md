@@ -24,7 +24,37 @@ AESBridge.exe <path-to-binary>           # parse SchedulerFile → tournament_da
 AESBridge.exe <path-to-binary> --remote  # decode RemoteEntryUpdate String[] payload
 AESBridge.exe --encode-remote <outFile> <fileIdGuid> <matchId> <outcome> <workTeamNumber> <typeOfWorkTeam> [<t1> <t2> ...]
                                           # encode a score correction (write-back direction)
+AESBridge.exe --roundtrip <in.vsf> <out.vsf>        # test: load + save through AES's own code
+AESBridge.exe --edit <in.vsf> <out.vsf> <op> ...    # test: edit through AES's model, save, recheck
+AESBridge.exe --ids <in.vsf>                        # test: list team/court/match ids for --edit
+AESBridge.exe --host-batch <in.vsf> <out.vsf> <changes.json> [<payload.bin>]
+                                                    # spike: apply a JSON batch, save, recheck, build PostEvent bytes
+AESBridge.exe --plays <in.vsf>                      # spike: list rounds/plays/slots and reseeding teams
+AESBridge.exe --publish <file.vsf> --key <ServerSafeKey> [--force-results-import]
+                                                    # spike: publish to AES's servers like Update Now (asks for the AES login)
 ```
+`--host-batch` and `--plays` are in `HostBatch.cs` (headless host-loop spike; see
+`docs/WRITE_BACK_EDITOR_SCOPING.md`, "Headless host loop"). They never open a network
+connection. `changes.json` is an array, or `{ "forceResultsImport": false, "changes": [...] }`,
+applied in order:
+```json
+{ "op": "move",   "match": -50073, "court": "Dunes 2", "start": "2025-02-09T08:00" }
+{ "op": "score",  "match": -50073, "sets": [[20, 25], [22, 25]] }
+{ "op": "finish", "play": -50010, "ranks": [1, 2, 4, 3] }          // one per Play.Teams slot, null = none
+{ "op": "reseed", "play": -50010, "team": 1, "seed": 2 }           // team = slot index or team code
+{ "op": "reseed", "round": -50006, "team": "g12fwvbc1ho", "seed": 1 } // seed null = clear
+{ "op": "reseed-flag", "play": -50010, "rank": 1, "value": true }   // design change: rank N is reseeded
+```
+It prints every value that changed from the input (data, then AES's display text for each
+match side and play slot), fails if the reloaded file differs from the edited model, and
+writes `<payload.bin>` as the plaintext PostEvent frame (before the stream cipher; no
+credentials). Every `.vsf` mode prints the input's format version and refuses one newer
+than the referenced assembly's `SchedulerFile.CURRENT_VERSION`. Cross-check outputs with
+`python -I tools/vsf_xcheck.py <before.vsf> <after.vsf> [<payload.bin>]`.
+`--roundtrip`, `--edit` and `--ids` are test modes in `VsfEditTool.cs` (the monitor never calls
+them); see `docs/WRITE_BACK_EDITOR_SCOPING.md`, "Round-trip test". Run them only on a copy
+of a finished event: the copy keeps the real event's FileID. Before opening a test file in AES,
+block that AES copy's network; AES contacts its sync service on every file open.
 Output JSON is written next to the input file (or next to AESBridge.exe if piped).
 `--encode-remote` writes raw BinaryFormatter bytes to `<outFile>` instead (binary,
 not JSON — the caller sends it straight over the wire, never through stdout/`text=True`
@@ -37,7 +67,10 @@ subprocess capture, which would corrupt it).
 ## Key Files
 | File | Purpose |
 |------|---------|
-| AESBridge.cs | Entire bridge — one file |
+| AESBridge.cs | The bridge: parse, decode and encode modes |
+| VsfEditTool.cs | Test modes that save a .vsf through AES's own code (`--roundtrip`, `--edit`, `--ids`) |
+| HostBatch.cs | Headless host-loop spike (`--host-batch`, `--plays`) and the shared format check |
+| Publish.cs | Publish spike (`--publish`): AES's own `NetConnection`, sign-in typed at the console, `PostEvent`. The only mode that opens a network connection; run it by hand, on a test event |
 | AESBridge.csproj | .NET 4.8 x86 project |
 | EventScheduler.exe | AES dependency — required at build and runtime |
 | bin/Release/net48/AESBridge.exe | Compiled output |
