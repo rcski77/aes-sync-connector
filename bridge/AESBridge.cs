@@ -63,6 +63,9 @@ class AESBridge
                 return HostBatch.Run(args.Skip(1).ToArray());
             if (args.Length >= 1 && args[0] == "--plays")
                 return HostBatch.Plays(args.Skip(1).ToArray());
+            // --host-apply: Relay hosting (phase 3): apply one change batch, save, verify by reload, write the parse.
+            if (args.Length >= 1 && args[0] == "--host-apply")
+                return HostBatch.HostApply(args.Skip(1).ToArray());
 
             // --vsf: Relay hosting (read-only): check and parse a dropped .vsf into tournament_data.json.
             // Prints one JSON line with the result; never touches the network.
@@ -106,7 +109,7 @@ class AESBridge
     }
 
     // The tournament_data.json text for a loaded file (the live path and --vsf share it).
-    static string BuildJson(SchedulerFile sf)
+    internal static string BuildJson(SchedulerFile sf)
     {
         sf.EnableCaching();
 
@@ -1122,11 +1125,11 @@ class AESBridge
 
     // ── JSON primitives ────────────────────────────────────────────────────
 
-    static string S(string s) => s == null ? "null"
+    internal static string S(string s) => s == null ? "null"
         : "\"" + s.Replace("\\","\\\\").Replace("\"","\\\"")
                   .Replace("\r","").Replace("\n"," ") + "\"";
     static string N(int? n) => n.HasValue ? n.Value.ToString() : "null";
-    static string B(bool b) => b ? "true" : "false";
+    internal static string B(bool b) => b ? "true" : "false";
 
     static void AppendArray<T>(StringBuilder sb, string key,
         IEnumerable<T> items, Func<T,string> toJson)

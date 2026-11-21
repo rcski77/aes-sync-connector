@@ -31,6 +31,8 @@ AESBridge.exe --ids <in.vsf>                        # test: list team/court/matc
 AESBridge.exe --host-batch <in.vsf> <out.vsf> <changes.json> [<payload.bin>]
                                                     # spike: apply a JSON batch, save, recheck, build PostEvent bytes
 AESBridge.exe --plays <in.vsf>                      # spike: list rounds/plays/slots and reseeding teams
+AESBridge.exe --host-apply <in.vsf> <out.vsf> <changes.json> <out.json>
+                                                    # Relay Sync: apply one change batch, save, verify by reload, write the parse
 AESBridge.exe --publish <file.vsf> --key <ServerSafeKey> [--force-results-import]
                                                     # by hand: publish to AES's servers like Update Now (asks for the AES login)
 AESBridge.exe --publish-json                        # Relay Sync: sign-in check or publish; one JSON object on stdin, one JSON line out
@@ -49,6 +51,16 @@ newer than `HostBatch.SupportedVersion` (the assembly's `SchedulerFile.CURRENT_V
 file and AES's push of the same file give identical JSON). stdout is one line:
 `{"ok": true, "format": N, "supported": M}` or `{"ok": false, "reason": "refused_format"|"load_failed", "format": N,
 "supported": M, "error": "..."}`, exit 0 either way (2 for bad arguments). No network.
+
+`--host-apply` (in `HostBatch.cs`) is what Relay Sync runs for each change batch while hosting (monitor/CLAUDE.md,
+"change batches and versions"). Same changes as `--host-batch`, applied whole or not at all: each through AES's
+model in order; then no data value may have changed outside the matches and plays the batch names (display text
+may: results flow into later matches); then save to `<out.vsf>`, reload from disk, and the reload must equal the
+edited model; then `<out.json>` gets the parse (`BuildJson`, as `--vsf`). Any failure deletes both outputs. One
+line on stdout, exit 0 (2 for arguments): `{"ok": true, "format", "supported", "changed"}` or `{"ok": false,
+"reason": "bad_input"|"refused_format"|"load_failed"|"rejected"|"verify_failed"|"error", "index" (rejected: the
+0-based change refused), "error", "format", "supported"}`. `score` takes an optional `outcome` (`FirstTeamWon`,
+`SecondTeamWon`, `Tie`, checked against the sets) and keeps the match's work team. No network.
 
 `--host-batch` and `--plays` are in `HostBatch.cs` (headless host-loop spike; see
 `docs/WRITE_BACK_EDITOR_SCOPING.md`, "Headless host loop"). They never open a network

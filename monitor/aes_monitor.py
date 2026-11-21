@@ -14,7 +14,7 @@ Usage:  python aes_monitor.py
 import os, sys, socket, struct, hashlib, base64, gzip, zlib, glob
 import subprocess, json, datetime, threading, time, re, queue
 import configparser, urllib.request, urllib.error, urllib.parse
-import shutil, getpass
+import shutil, getpass, copy
 import xml.etree.ElementTree as ET
 
 try:
@@ -574,7 +574,8 @@ def _ack_outbox(base_url, ingest_key, timeout, cmd_id, status, detail, cf_header
 SNAPSHOT_INTERVAL = 180  # seconds between full snapshot POSTs
 
 def _post(url, payload_obj, ingest_key, timeout, label, cf_headers=None):
-    """Serialize and POST a payload; log result. Runs in a daemon thread."""
+    """Serialize and POST a payload; log result. Runs in a daemon thread (or inline, see push_snapshot's sync).
+    Returns True on a 200."""
     try:
         payload = json.dumps(payload_obj).encode('utf-8')
         headers = {
@@ -595,14 +596,15 @@ def _post(url, payload_obj, ingest_key, timeout, label, cf_headers=None):
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
                 log(f"{label} OK (200)")
-            else:
-                log(f"{label} returned {resp.status}")
+                return True
+            log(f"{label} returned {resp.status}")
     except urllib.error.HTTPError as e:
         log(f"{label} HTTP {e.code}: {e.reason}")
     except urllib.error.URLError as e:
         log(f"{label} failed: {e.reason}")
     except Exception as e:
         log(f"{label} exception: {e}")
+    return False
 
 
 def _eastern_naive(iso_str):
@@ -1104,7 +1106,7 @@ def _bracket_signature(bracket_payload):
 
 
 def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=None, allow_writeback=False,
-                  now=None, gold_spots_map=None):
+                  now=None, gold_spots_map=None, sync=False):
     """POST full tournament state to /api/ingest/snapshot. Returns the (pools[],
     brackets[]) payloads it sent (so the caller can baseline per-pool/per-bracket
     change detection), or None if nothing was sent."""
@@ -1129,7 +1131,10 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
         'divisions':     [_division_payload(d) for d in tournament_data.get('divisions', [])],
     }
     url = base_url.rstrip('/') + '/snapshot'
-    threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot', cf_headers), daemon=True).start()
+    if sync:  # Relay hosting: the snapshot must land before the batch's commands are acked
+        _post(url, payload, ingest_key, timeout, 'snapshot', cf_headers)
+    else:
+        threading.Thread(target=_post, args=(url, payload, ingest_key, timeout, 'snapshot', cf_headers), daemon=True).start()
     return pools, brackets
 
 
@@ -1543,11 +1548,21 @@ class RelayHost:
         self.publish_interval = PUBLISH_INTERVAL_DEFAULT
         self.publish_now_requested = None
         self.publisher = None         # RelayPublisher, set by monitor(); adds its state to the report
-        # The latest version, kept in data/ while hosting (phase 2: the dropped file as last loaded). It is what
+        # The latest version, kept in data/ while hosting: a copy of the store's newest version (phase 3). It is what
         # gets published and what is written next to the dropped file as '(Relay latest).vsf' when hosting stops.
         self.latest_path = os.path.join(DATA_DIR, 'relay_latest.vsf')
         self.lock = threading.Lock()
-        self.current = None           # {'path', 'data', 'key'} of the hosted file, for the publisher thread
+        self.current = None           # {'path', 'data', 'key', 'version'} of the latest version, for the other threads
+        # Phase 3, change batches and versions (VersionStore, RelayBatcher). write_lock serialises every change to the
+        # store: a batch, a rollback, a new file, a conflict choice.
+        self.store = VersionStore()
+        self.write_lock = threading.RLock()
+        self.conflict = None          # {'at', 'sha'}: the dropped file changed after Relay applied batches
+        self.publish_version_request = None   # {'number', 'requestedAt'} from the /hosting answer
+        self.conflict_choice_request = None   # {'choice', 'requestedAt'} likewise
+        self.publish_version_handled = None   # the stamps acted on (an old request isn't a new one)
+        self.conflict_choice_handled = None
+        self.publish_requested = threading.Event()  # a rollback asks the publisher to publish at once
 
     def _say(self, line):
         if line != self.last_line:
@@ -1605,9 +1620,13 @@ class RelayHost:
                           f"from this config's.")
             else:
                 state = 'hosting'
-                if not self.hosting.is_set() or changed:
-                    if not self.hosting.is_set():
+                started = not self.hosting.is_set()
+                if started or changed:
+                    if started:
                         self.hosting_since = now
+                        # Requests already on the dashboard when hosting starts are old, not new.
+                        self.publish_version_handled = (self.publish_version_request or {}).get('requestedAt')
+                        self.conflict_choice_handled = (self.conflict_choice_request or {}).get('requestedAt')
                     ev = data.get('event', {})
                     matches = data.get('matches', [])
                     self.last_line = None
@@ -1615,14 +1634,14 @@ class RelayHost:
                               f"{len(matches)} matches ({sum(1 for m in matches if m.get('decided'))} decided), "
                               f"{len(data.get('pools', []))} pools, {len(data.get('brackets', []))} brackets, "
                               f"{len(data.get('courts', []))} courts. AES sync paused.")
-                    self._keep_latest(path, data)
+                    if not self._adopt_file(path, data, started, now):
+                        return None  # couldn't read Relay's own latest version; try again next check
                     self.hosting.set()
                     self.last_snapshot = None  # push now
                 report['hostingSince'] = _utc_iso_ms(self.hosting_since)
+                self._handle_conflict_choice(now)
                 if self.last_snapshot is None or (now - self.last_snapshot).total_seconds() >= SNAPSHOT_INTERVAL:
-                    push_snapshot(data, self.base_url, self.ingest_key, self.timeout, self.cf_headers,
-                                  allow_writeback=False, now=now)
-                    self.last_snapshot = now
+                    self.push_latest(now)
 
         if state != 'hosting' and self.hosting.is_set():
             self.stop_hosting()
@@ -1630,19 +1649,106 @@ class RelayHost:
         report['state'] = state
         report.update(self.publisher.report_fields() if self.publisher and state == 'hosting'
                       else RelayPublisher.empty_fields())
+        report.update(self.version_fields() if state == 'hosting' else VersionStore.empty_fields())
         return report
 
-    def _keep_latest(self, path, data):
-        """Copy the hosted file to data/ as the latest version, and remember what the publisher needs."""
+    # ── versions (phase 3) ──
+
+    def _adopt_file(self, path, data, started, now):
+        """The dropped file was loaded (hosting started, or it changed while hosting). Decide what it means for the
+        versions: resume Relay's own latest version, take the file as a new version, or report a conflict. Returns
+        False if Relay's latest version couldn't be read."""
+        sha = file_sha256(path)
+        with self.write_lock:
+            outcome = self.store.adopt(path, sha, self.event_key, data)
+            if outcome == 'unchanged' and not started:
+                return True  # touched, same content
+            if outcome == 'new':
+                self.conflict = None
+                log(f"Hosting: version {self.store.latest_number()} is the file as dropped.")
+                self.set_latest(data)
+                return True
+            if outcome == 'conflict':
+                if not self.conflict or self.conflict['sha'] != sha:
+                    self.conflict = {'at': now, 'sha': sha}
+                    log("Hosting: the dropped file changed, but Relay has applied changes since it was loaded. "
+                        "Relay stopped applying changes and publishing. Choose on the dashboard: keep Relay's "
+                        "versions, or start over from the file.")
+            elif outcome == 'unchanged':
+                self.conflict = None
+            if started or not self.current:
+                # Resume from (or, in a conflict, keep showing) Relay's latest version.
+                result, latest = load_vsf(self.store.latest_path(), self.bridge_exe)
+                if not result.get('ok') or latest is None:
+                    log(f"Hosting: can't read Relay's version {self.store.latest_number()}: "
+                        f"{result.get('error') or result.get('reason')}")
+                    return False
+                if outcome == 'unchanged':
+                    log(f"Hosting: carrying on from Relay's version {self.store.latest_number()}.")
+                self.set_latest(latest)
+            return True
+
+    def _handle_conflict_choice(self, now):
+        """Act on a new conflict choice from the dashboard: 'keep' Relay's versions (the file is ignored until it
+        changes again) or start over from the 'file' (a new version that is the dropped file)."""
+        req = self.conflict_choice_request
+        if not req or req.get('requestedAt') == self.conflict_choice_handled:
+            return
+        self.conflict_choice_handled = req.get('requestedAt')
+        if not self.conflict or not self.loaded:
+            return
+        with self.write_lock:
+            sha = file_sha256(self.loaded['path'])
+            if req.get('choice') == 'keep':
+                self.store.acknowledge(sha)
+                log("Hosting: keeping Relay's versions; the dropped file is ignored until it changes again.")
+            elif req.get('choice') == 'file':
+                self.store.add(self.loaded['path'], 'file', ['Started over from the file'], file_sha=sha,
+                               data=self.loaded['data'])
+                self.set_latest(self.loaded['data'])
+                log(f"Hosting: started over from the file as version {self.store.latest_number()}.")
+            else:
+                return
+            self.conflict = None
+            self.last_snapshot = None  # push the (possibly new) latest version, with write-back on again
+
+    def set_latest(self, data):
+        """The store's newest version becomes the latest: copied to data/relay_latest.vsf and remembered with its
+        parse, for snapshots, publishing and the '(Relay latest)' file."""
         ensure_data_dir()
-        tmp = self.latest_path + '.tmp'
-        shutil.copyfile(path, tmp)
-        os.replace(tmp, self.latest_path)
         with self.lock:
-            self.current = {'path': path, 'data': data, 'key': self.event_key}
+            tmp = self.latest_path + '.tmp'
+            shutil.copyfile(self.store.latest_path(), tmp)
+            os.replace(tmp, self.latest_path)
+            self.current = {'path': self.loaded['path'] if self.loaded else None, 'data': data,
+                            'key': self.event_key, 'version': self.store.latest_number()}
+
+    def latest_data(self):
+        with self.lock:
+            return self.current['data'] if self.current else None
+
+    def push_latest(self, now=None, sync=False):
+        """A snapshot of the latest version. Write-back is on while hosting (changes come through the outbox and are
+        applied to Relay's own copy), and off in a conflict, so the dashboard holds new changes back."""
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        data = self.latest_data()
+        if data is None:
+            return
+        push_snapshot(data, self.base_url, self.ingest_key, self.timeout, self.cf_headers,
+                      allow_writeback=self.conflict is None, now=now, sync=sync)
+        self.last_snapshot = now
+
+    def version_fields(self):
+        """The versions and the conflict for the /hosting report: numbers, times and what changed, never names."""
+        with self.write_lock:
+            fields = self.store.report_fields()
+        fields['conflictAt'] = _utc_iso_ms(self.conflict['at']) if self.conflict else None
+        fields['conflictChoiceHandled'] = self.conflict_choice_handled
+        fields['publishVersionHandled'] = self.publish_version_handled
+        return fields
 
     def hosted(self):
-        """{'path', 'data', 'key'} of the file being hosted, or None."""
+        """{'path', 'data', 'key', 'version'} of the latest version being hosted, or None."""
         with self.lock:
             return dict(self.current) if self.current and self.hosting.is_set() else None
 
@@ -1651,11 +1757,17 @@ class RelayHost:
         dropped file as '<file name> (Relay latest).vsf' (the folder check skips it), then clear."""
         if not self.hosting.is_set():
             return
+        with self.write_lock:  # a batch being applied finishes first, so the latest version is whole
+            self._stop_hosting()
+
+    def _stop_hosting(self):
         with self.lock:
             current, self.current = self.current, None
         self.hosting.clear()
         self.hosting_since = None
         self.last_snapshot = None
+        self.conflict = None
+        self.publish_requested.clear()
         if current and os.path.exists(self.latest_path):
             dest = os.path.join(os.path.dirname(current['path']), relay_latest_name(current['path']))
             try:
@@ -1688,7 +1800,18 @@ class RelayHost:
         self.publish_interval = clamp_publish_interval(answer.get('publishIntervalMinutes'))
         stamp = answer.get('publishNowRequestedAt')
         self.publish_now_requested = stamp if isinstance(stamp, str) and stamp else None
-        changed = switch_on != self.switch_on or event_key != self.event_key
+        # Phase 3: "Publish this version" and the director's choice in a conflict, each with its request stamp.
+        pv = answer.get('publishVersion')
+        self.publish_version_request = (
+            {'number': pv['number'], 'requestedAt': pv['requestedAt']}
+            if isinstance(pv, dict) and isinstance(pv.get('number'), int) and not isinstance(pv.get('number'), bool)
+            and isinstance(pv.get('requestedAt'), str) else None)
+        cc = answer.get('conflictChoice')
+        self.conflict_choice_request = (
+            {'choice': cc['choice'], 'requestedAt': cc['requestedAt']}
+            if isinstance(cc, dict) and cc.get('choice') in ('keep', 'file') and isinstance(cc.get('requestedAt'), str)
+            else None)
+        changed =switch_on != self.switch_on or event_key != self.event_key
         self.switch_on, self.event_key = switch_on, event_key
         return changed
 
@@ -1706,6 +1829,402 @@ class RelayHost:
             except Exception as e:
                 log(f"Hosting check error: {e}")
             stop_event.wait(HOSTING_CHECK_INTERVAL)
+
+
+# ── Relay hosting: change batches and versions (phase 3) ──────────────────────
+# While hosting, the dashboard's changes (score corrections, finish ranks) come through the outbox as they do with
+# AES connected. RelayBatcher polls it, turns the commands of one poll into one change batch and applies it to the
+# working copy, data/versions/current.vsf, with AESBridge.exe --host-apply (AES's own model; saved, then checked by
+# reload; whole or not at all). The dropped file is never written. The working copy feeds the dashboard (a snapshot
+# after each batch), is what gets published, and is written as '(Relay latest).vsf' when hosting stops.
+#
+# A version is a real change, kept as a copy of the file (vNNNN.vsf plus vNNNN.json): the dropped file (at the start,
+# or when the director starts over from it), a batch that does more than scores and finishes (moves and reseeds, from
+# phase 4's editors), "Publish this version", and an hourly backup (only when scores or finishes changed since the
+# newest version, so quiet hours make none). Score and finish batches change the working copy without making a
+# version (an event day has hundreds); each is logged in batches.jsonl (time, the version it built on, what changed,
+# the command ids), and the dashboard keeps its own score audit. Versions stay on this laptop: the dashboard gets
+# only the list (number, time, kind, what changed in words, never a name) and how many score and finish batches came
+# since the newest. "Publish this version" makes a new version that is a copy of the chosen one, so it becomes the
+# working copy (its scores and finishes too), and publishes it: a rollback. If the dropped file changes after Relay
+# has applied anything since it was loaded (someone edited in AES and saved it), Relay stops applying and publishing
+# and reports a conflict; the director chooses on the dashboard: keep Relay's copy, or start over from the file.
+
+VERSIONS_DIR = os.path.join(DATA_DIR, 'versions')
+VERSIONS_REPORTED = 20      # the newest versions listed in the /hosting report
+VERSION_CHANGES_REPORTED = 6
+BATCH_RETRY_SECONDS = 30    # after a batch fails (not refused): wait before polling again
+BACKUP_INTERVAL = 3600      # an hourly backup version, when scores or finishes changed since the newest version
+AUTO_REQUESTED_BY = ('Auto-set', 'Auto-unset')  # the dashboard's own automatic commands (no person's name)
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class VersionStore:
+    """data/versions/: current.vsf (the working copy), one .vsf per version, batches.jsonl and index.json (the list).
+    Version 1 is the dropped file. The index remembers the event, the dropped file's content (fileSha), how many of
+    Relay's own changes came after it (which decides what a changed dropped file means, adopt) and how many score and
+    finish batches came after the newest version."""
+
+    def __init__(self, folder=None):
+        self.folder = folder or VERSIONS_DIR
+        self.index = None
+
+    def _index_path(self):
+        return os.path.join(self.folder, 'index.json')
+
+    def path(self, number):
+        return os.path.join(self.folder, f'v{number:04d}.vsf')
+
+    def _load(self):
+        try:
+            with open(self._index_path(), 'r', encoding='utf-8') as f:
+                index = json.load(f)
+            return index if isinstance(index.get('versions'), list) and index['versions'] else None
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def _save(self):
+        tmp = self._index_path() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(self.index, f, indent=1)
+        os.replace(tmp, self._index_path())
+
+    def latest(self):
+        return self.index['versions'][-1] if self.index and self.index['versions'] else None
+
+    def latest_number(self):
+        v = self.latest()
+        return v['number'] if v else None
+
+    def latest_path(self):
+        """The working copy: the newest version plus the score and finish batches applied since."""
+        return os.path.join(self.folder, 'current.vsf')
+
+    def _put(self, src, dest, move=False):
+        tmp = dest + '.tmp'
+        if move:
+            os.replace(src, tmp)
+        else:
+            shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+
+    def has(self, number):
+        return bool(self.index) and any(v['number'] == number for v in self.index['versions']) \
+            and os.path.exists(self.path(number))
+
+    def adopt(self, path, sha, event_key, data=None):
+        """The dropped file (content `sha`) for event `event_key`. Returns:
+        'unchanged' - Relay's versions belong to this file: carry on from the latest;
+        'new'       - the file is the newest version (no versions for this event, or none of Relay's own since the
+                      file was last taken);
+        'conflict'  - the file differs, and Relay has applied changes since it was taken."""
+        if self.index is None:
+            self.index = self._load()
+        if self.index and self.index.get('eventKey') == event_key and os.path.exists(self.latest_path()):
+            if self.index.get('fileSha') == sha:
+                return 'unchanged'
+            if not self.index.get('changesSinceFile'):
+                self.add(path, 'file', ['From the dropped file'], file_sha=sha, data=data)
+                return 'new'
+            return 'conflict'
+        # Another event's versions (or none, or damaged): put them aside, start a new list.
+        if os.path.isdir(self.folder) and os.listdir(self.folder):
+            aside = self.folder + '-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+            os.replace(self.folder, aside)
+            log(f"Hosting: earlier versions moved to data/{os.path.basename(aside)}.")
+        os.makedirs(self.folder, exist_ok=True)
+        self.index = {'eventKey': event_key, 'fileSha': None, 'changesSinceFile': 0, 'changesSinceVersion': 0,
+                      'versions': []}
+        self.add(path, 'file', ['From the dropped file'], file_sha=sha, data=data)
+        return 'new'
+
+    def add(self, src, kind, changes, commands=None, source=None, file_sha=None, move=False, data=None):
+        """A new version from `src` (copied, or moved for a bridge output), which also becomes the working copy.
+        kind: 'file' (the dropped file), 'batch' (dashboard changes beyond scores and finishes) or 'rollback' (a copy
+        of version `source`)."""
+        number = (self.latest_number() or 0) + 1
+        self._put(src, self.path(number), move)
+        self._put(self.path(number), self.latest_path())
+        matches = (data or {}).get('matches')
+        entry = {'number': number, 'at': _utc_iso_ms(datetime.datetime.now(datetime.timezone.utc)), 'kind': kind,
+                 'from': source, 'changes': list(changes),
+                 # How far the event was: matches with a result, of all matches in the file.
+                 'decided': sum(1 for m in matches if m.get('decided')) if matches is not None else None,
+                 'matches': len(matches) if matches is not None else None}
+        with open(os.path.join(self.folder, f'v{number:04d}.json'), 'w', encoding='utf-8') as f:
+            json.dump(dict(entry, commands=commands or []), f, indent=1)
+        self.index['versions'].append(entry)
+        if kind == 'file':
+            self.index['fileSha'] = file_sha
+            self.index['changesSinceFile'] = 0
+        else:
+            self.index['changesSinceFile'] = (self.index.get('changesSinceFile') or 0) + 1
+        self.index['changesSinceVersion'] = 0
+        self._save()
+        return entry
+
+    def apply_batch(self, src, changes, commands, keep_version, data=None):
+        """An applied batch's file (`src`, moved) becomes the working copy. With `keep_version` (the batch does more
+        than scores and finishes) it is also a new version; otherwise it is only logged. Returns the version entry,
+        or None."""
+        at = _utc_iso_ms(datetime.datetime.now(datetime.timezone.utc))
+        with open(os.path.join(self.folder, 'batches.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'at': at, 'after': self.latest_number(), 'changes': list(changes),
+                                'commands': list(commands)}) + '\n')
+        if keep_version:
+            return self.add(src, 'batch', changes, commands=commands, move=True, data=data)
+        self._put(src, self.latest_path(), move=True)
+        self.index['changesSinceFile'] = (self.index.get('changesSinceFile') or 0) + 1
+        self.index['changesSinceVersion'] = (self.index.get('changesSinceVersion') or 0) + 1
+        self._save()
+        return None
+
+    def backup_if_due(self, now=None, data=None):
+        """The hourly backup: a version of the working copy once the newest version is BACKUP_INTERVAL old, only if
+        score or finish changes came since (so a night with no matches makes none). Returns the entry, or None."""
+        n = (self.index or {}).get('changesSinceVersion') or 0
+        latest = self.latest()
+        if not n or not latest:
+            return None
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        if (now - datetime.datetime.fromisoformat(latest['at'].replace('Z', '+00:00'))).total_seconds() < BACKUP_INTERVAL:
+            return None
+        changes = 'score or finish change' if n == 1 else 'score and finish changes'
+        return self.add(self.latest_path(), 'backup', [f'Hourly backup: {n} {changes}'], data=data)
+
+    def acknowledge(self, sha):
+        """Keep Relay's versions in a conflict: this content of the dropped file is now known, and ignored."""
+        self.index['fileSha'] = sha
+        self._save()
+
+    @staticmethod
+    def empty_fields():
+        return {'latestVersion': None, 'versionCount': None, 'versions': None, 'changesSinceVersion': None,
+                'conflictAt': None, 'conflictChoiceHandled': None, 'publishVersionHandled': None}
+
+    def report_fields(self):
+        versions = (self.index or {}).get('versions') or []
+        listed = []
+        for v in reversed(versions[-VERSIONS_REPORTED:]):
+            changes = v.get('changes') or []
+            listed.append({'number': v['number'], 'at': v['at'], 'kind': v['kind'], 'from': v.get('from'),
+                           'decided': v.get('decided'), 'matches': v.get('matches'),
+                           'changes': changes[:VERSION_CHANGES_REPORTED],
+                           'more': max(0, len(changes) - VERSION_CHANGES_REPORTED)})
+        return {'latestVersion': self.latest_number(), 'versionCount': len(versions), 'versions': listed,
+                'changesSinceVersion': (self.index or {}).get('changesSinceVersion') or 0}
+
+
+def _fetch_outbox(base_url, ingest_key, timeout, cf_headers=None):
+    """GET the pending outbox commands (oldest first)."""
+    headers = {'Authorization': f'Bearer {ingest_key}', 'User-Agent': 'aes-sync-connector/1.0'}
+    if cf_headers:
+        headers.update(cf_headers)
+    req = urllib.request.Request(base_url.rstrip('/') + '/outbox', headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return (json.loads(resp.read().decode('utf-8') or 'null') or {}).get('commands') or []
+
+
+def _play_label(kind, play):
+    """'Test R1A' / 'Test R2Gold': division code and AES's short name, never a team."""
+    name = play.get('fullShortName') or play.get('shortName') or str(play.get('poolId') or play.get('bracketId'))
+    return f"{play.get('divisionCode') or ''} {name}".strip()
+
+
+def command_change(cmd, work):
+    """One outbox command as a --host-apply change, merged with `work` (the latest version's parse, updated in place
+    as finishes are merged, so a second command for the same play builds on the first). Returns (change, summary);
+    change None means nothing to change. Raises FinishRejected (or KeyError/TypeError/ValueError/LookupError) for a
+    command to ack 'rejected': the hosted file is the whole truth, so a match or play it doesn't have never will."""
+    auto = ' (auto)' if cmd.get('requestedBy') in AUTO_REQUESTED_BY else ''
+    if cmd.get('type') == 'finish_ranks':
+        kind, play, current, final = _merge_finish_ranks(cmd, work)
+        label = _play_label(kind, play)
+        if final == current:
+            return None, f"{label}: finishes already set"
+        for ta, rank in zip(play.get('teamAssignments') or [], final):
+            ta['finishRank'] = rank
+        ranks = sorted(int(ch['rank']) for ch in cmd.get('finishRanks') or [] if ch.get('rank') is not None)
+        what = 'finishes cleared' if not ranks else \
+            f"finish {ranks[0]} set" if len(ranks) == 1 else f"finishes {ranks[0]}-{ranks[-1]} set"
+        return {'op': 'finish', 'play': int(cmd['playId']), 'ranks': final}, f"{label}: {what}{auto}"
+    if cmd.get('type', 'score_correction') == 'score_correction':
+        match_id = int(cmd['matchId'])
+        m = next((x for x in work.get('matches', []) if x.get('matchId') == match_id), None)
+        if m is None:
+            raise LookupError(f'match {abs(match_id)} is not in the hosted file')
+        sets = cmd.get('sets')
+        if sets is None:
+            sets = m.get('sets') or []
+        pairs = [[int(s['team1']), int(s['team2'])] for s in sets]
+        if not pairs:
+            raise ValueError('no set scores')
+        change = {'op': 'score', 'match': match_id, 'sets': pairs}
+        if cmd.get('outcome'):
+            change['outcome'] = cmd['outcome']
+        label = f"{m.get('divisionCode') or ''} {m.get('shortName') or abs(match_id)}".strip()
+        return change, f"{label}: score {', '.join(f'{a}-{b}' for a, b in pairs)}{auto}"
+    raise ValueError(f"unknown command type {cmd.get('type')!r}")
+
+
+def host_apply(bridge_exe, in_path, changes, out_vsf, out_json):
+    """Run AESBridge.exe --host-apply. Returns its result line."""
+    ensure_data_dir()
+    changes_path = os.path.join(DATA_DIR, 'batch_changes.json')
+    with open(changes_path, 'w', encoding='utf-8') as f:
+        json.dump({'changes': changes}, f)
+    try:
+        r = subprocess.run([bridge_exe, '--host-apply', in_path, out_vsf, changes_path, out_json],
+                           capture_output=True, text=True, timeout=300)
+        lines = [l for l in r.stdout.splitlines() if l.strip().startswith('{')]
+        if lines:
+            return json.loads(lines[-1])
+        return {'ok': False, 'reason': 'error', 'error': (r.stderr.strip() or f'no result (exit {r.returncode})')[:200]}
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'reason': 'error', 'error': 'the bridge timed out'}
+    except Exception as e:
+        return {'ok': False, 'reason': 'error', 'error': f'bridge: {type(e).__name__}: {e}'}
+
+
+class RelayBatcher:
+    """Polls the outbox while hosting, applies each poll's commands as one batch, and acts on "Publish this version".
+    Its own thread: a batch never holds up the 10-second report or a publish."""
+
+    def __init__(self, host, bridge_exe, poll_interval=5):
+        self.host = host
+        self.bridge_exe = bridge_exe
+        self.poll_interval = max(2, poll_interval)
+        self.retry_after = 0.0
+        self.poll_failed = False
+
+    def run(self, stop_event):
+        while not stop_event.is_set():
+            try:
+                self.step()
+            except Exception as e:
+                log(f"Batch error: {type(e).__name__}: {e}")
+            stop_event.wait(self.poll_interval)
+
+    def _ack(self, cmd, status, detail=None):
+        log(f"{cmd.get('type', 'score_correction')} {cmd.get('id')} -> {status}{f' ({detail})' if detail else ''}")
+        _ack_outbox(self.host.base_url, self.host.ingest_key, self.host.timeout, cmd['id'], status, detail,
+                    self.host.cf_headers)
+
+    def step(self):
+        if not self.host.hosted():
+            return
+        self.rollback_if_requested()
+        if not self.host.conflict:
+            with self.host.write_lock:
+                entry = self.host.store.backup_if_due(data=self.host.latest_data())
+            if entry:
+                log(f"Version {entry['number']}: {entry['changes'][0]}.")
+        if self.host.conflict or time.time() < self.retry_after:
+            return  # in a conflict the commands wait in the outbox; the dashboard holds new ones back
+        try:
+            cmds = _fetch_outbox(self.host.base_url, self.host.ingest_key, self.host.timeout, self.host.cf_headers)
+            self.poll_failed = False
+        except Exception as e:
+            if not self.poll_failed:
+                log(f"outbox poll failed: {e}")
+            self.poll_failed = True
+            return
+        if cmds:
+            self.apply(cmds)
+
+    def apply(self, cmds):
+        """One batch from `cmds`: refused commands are acked 'rejected' and left out; the rest are applied whole or
+        not at all. A change AES refuses is acked 'rejected' and the batch is tried again without it."""
+        host = self.host
+        with host.write_lock:
+            if not host.hosted() or host.conflict:
+                return
+            remaining = list(cmds)
+            while remaining:
+                work = copy.deepcopy(host.latest_data())
+                batch = []  # (cmd, change, summary)
+                for cmd in remaining:
+                    try:
+                        change, summary = command_change(cmd, work)
+                    except FinishRejected as e:
+                        self._ack(cmd, 'rejected', str(e))
+                        continue
+                    except (KeyError, TypeError, ValueError, LookupError) as e:
+                        self._ack(cmd, 'rejected', f'bad command: {e}' if not isinstance(e, LookupError) else str(e))
+                        continue
+                    if change is None:
+                        self._ack(cmd, 'applied', summary)
+                        continue
+                    batch.append((cmd, change, summary))
+                if not batch:
+                    return
+                out_vsf = os.path.join(DATA_DIR, 'batch_out.vsf')
+                out_json = os.path.join(DATA_DIR, 'batch_out.json')
+                result = host_apply(self.bridge_exe, host.store.latest_path(), [c for _, c, _ in batch], out_vsf, out_json)
+                if result.get('ok'):
+                    try:
+                        with open(out_json, 'r', encoding='utf-8-sig') as f:
+                            data = json.load(f)
+                    except Exception as e:
+                        result = {'ok': False, 'reason': 'error', 'error': f'parse output: {e}'}
+                    else:
+                        # Scores and finishes only change the working copy; anything more is a version.
+                        keep = any(c['op'] not in ('score', 'finish') for _, c, _ in batch)
+                        entry = host.store.apply_batch(out_vsf, [s for _, _, s in batch],
+                                                       [c.get('id') for c, _, _ in batch], keep, data=data)
+                        host.set_latest(data)
+                        log(f"Batch{f' (version {entry['number']})' if entry else ''}: " + '; '.join(s for _, _, s in batch))
+                        host.push_latest(sync=True)  # the dashboard sees it before the acks
+                        for cmd, _, _ in batch:
+                            self._ack(cmd, 'applied')
+                        return
+                index = result.get('index')
+                if result.get('reason') == 'rejected' and isinstance(index, int) and 0 <= index < len(batch):
+                    cmd = batch[index][0]
+                    self._ack(cmd, 'rejected', f"AES refused it: {result.get('error')}")
+                    # Try the others again (the ones acked above are done and left out).
+                    remaining = [c for i, (c, _, _) in enumerate(batch) if i != index]
+                    continue
+                # Not applied, nothing written: the commands stay pending and come back.
+                log(f"Batch: not applied ({result.get('reason')}: {result.get('error')}). Nothing changed; "
+                    f"trying again in {BATCH_RETRY_SECONDS} s.")
+                for cmd, _, _ in batch:
+                    self._ack(cmd, 'failed', f"{result.get('reason')}: {result.get('error')}"[:200])
+                self.retry_after = time.time() + BATCH_RETRY_SECONDS
+                return
+
+    def rollback_if_requested(self):
+        """'Publish this version': a new latest version that is a copy of the chosen one, then publish it."""
+        host = self.host
+        req = host.publish_version_request
+        if not req or req['requestedAt'] == host.publish_version_handled:
+            return
+        with host.write_lock:
+            host.publish_version_handled = req['requestedAt']
+            number = req['number']
+            if host.conflict:
+                log(f"Publish version {number}: not while the dropped file is in conflict; choose on the dashboard first.")
+                return
+            if not host.store.has(number):
+                log(f"Publish version {number}: there's no such version on this laptop.")
+                return
+            result, data = load_vsf(host.store.path(number), self.bridge_exe)
+            if not result.get('ok') or data is None:
+                log(f"Publish version {number}: can't read it ({result.get('error') or result.get('reason')}).")
+                return
+            entry = host.store.add(host.store.path(number), 'rollback', [f'Copy of version {number}'], source=number,
+                                   data=data)
+            host.set_latest(data)
+            log(f"Publish version {number}: version {entry['number']} is a copy of it; publishing.")
+            host.push_latest(sync=True)
+            host.publish_requested.set()
 
 
 # ── Relay hosting: AES sign-in and publishing (phase 2) ────────────────────────
@@ -1949,10 +2468,15 @@ class RelayPublisher:
             if self.signin:
                 self.signin.request()
             return
+        if self.host.conflict:
+            return  # the dropped file changed under Relay's versions: nothing is published until the director chooses
 
         now = datetime.datetime.now(datetime.timezone.utc)
         requested = self.host.publish_now_requested
         publish_now = requested is not None and requested != self.publish_now_handled
+        if self.host.publish_requested.is_set():  # "Publish this version" made a new latest version
+            self.host.publish_requested.clear()
+            publish_now = True
         # The next timed publish: the last attempt plus the interval (which the director may have changed since);
         # none while paused for another publisher.
         if self.last_publish_at:
@@ -1972,6 +2496,12 @@ class RelayPublisher:
 
     def cycle(self, hosted, kind, requested, stop_event):
         key = hosted['key']
+        # Publish a copy of the latest version taken now, so a batch saved meanwhile can't change the file mid-publish
+        # and the read-back compares with exactly what was sent.
+        publish_path = os.path.join(DATA_DIR, 'relay_publish.vsf')
+        with self.host.lock:
+            hosted = dict(self.host.current) if self.host.current else hosted
+            shutil.copyfile(self.host.latest_path, publish_path)
         dates = event_dates(hosted['data'])
         if kind == 'timed' and self.confirmed and self.published_view is not None:
             online = fetch_online_view(key, dates)
@@ -1990,7 +2520,7 @@ class RelayPublisher:
         self._set(publishing=True, publish_now_handled=requested)
         log(f"Publish: {'publishing now (dashboard)' if kind == 'now' else 'publishing'} to AES ...")
         result = bridge_aes(self.bridge_exe, {'action': 'publish', 'email': login[0], 'password': login[1],
-                                              'file': self.host.latest_path, 'key': key, 'forceResultsImport': False})
+                                              'file': publish_path, 'key': key, 'forceResultsImport': False})
         login = None
         word = result.get('result') or 'error'
         interval = datetime.timedelta(minutes=self.host.publish_interval)
@@ -2216,7 +2746,8 @@ def monitor(cfg):
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")
     print(f"  Ingest:    {base_url or '(not configured — set in aes_config.ini)'}")
     print(f"  Write-back: {'ENABLED — dashboard corrections will be sent into AES' if allow_writeback else 'disabled (read-only)'}")
-    print(f"  Hosting:   drop the event's .vsf here and turn on Host in Relay (event Settings) to run without AES")
+    print(f"  Hosting:   drop the event's .vsf here and turn on Host in Relay (event Settings) to run without AES;")
+    print(f"             dashboard changes are then applied to Relay's own copy (data/versions), whatever Write-back says")
     print(f"  Press Ctrl+C to stop")
     print(f"{'─'*62}\n")
 
@@ -2229,7 +2760,9 @@ def monitor(cfg):
         publisher = RelayPublisher(relay_host, bridge_exe)
         publisher.signin = AesSignIn(publisher, bridge_exe)
         relay_host.publisher = publisher
+        batcher = RelayBatcher(relay_host, bridge_exe, outbox_poll_interval)
         stop_hosting_threads = threading.Event()
+        threading.Thread(target=batcher.run, args=(stop_hosting_threads,), daemon=True).start()
         threading.Thread(target=relay_host.run, args=(stop_hosting_threads,), daemon=True).start()
         threading.Thread(target=publisher.run, args=(stop_hosting_threads,), daemon=True).start()
         threading.Thread(target=publisher.signin.run, args=(stop_hosting_threads,), daemon=True).start()
