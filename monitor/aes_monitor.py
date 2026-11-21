@@ -1421,6 +1421,219 @@ def show_update(data, raw_size, n, changes):
             print(f"\n  (no score changes vs previous update)")
     print(f"{'─'*62}")
 
+
+# ── Relay hosting (read-only) ───────────────────────────────────────────────────
+# docs/plans/relay-hosting-plan.md in the dashboard repo (phase 1), ADR-023. With the event's "Host in Relay"
+# switch on (Settings screen) and exactly one .vsf in this folder (next to the config file), Relay Sync stops
+# connecting to AES and feeds the dashboard from the file instead: it checks the file through the bridge
+# (--vsf: format, then the file's AES event key must be this connector key's event), then posts /snapshot from
+# it exactly as from AES's push, on start, whenever the file changes, and every SNAPSHOT_INTERVAL. Every
+# HOSTING_CHECK_INTERVAL seconds it reports its hosting state to /hosting and reads the switch back. No edits,
+# no publishing, and no connection to AES's servers. The file never leaves the laptop: only its name, format
+# and the state are reported. Anything short of "hosting" leaves the AES sync running as before.
+
+HOSTING_CHECK_INTERVAL = 10   # seconds between folder checks / /hosting reports
+HOSTING_SETTLE_SECONDS = 2    # a .vsf modified more recently than this is still being written; check next time
+
+
+def find_vsf_files(folder=None):
+    """The .vsf files directly in the Relay Sync folder (not data/ or app/), sorted."""
+    folder = folder or _BASE_DIR
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    return sorted(os.path.join(folder, n) for n in names
+                  if n.lower().endswith('.vsf') and os.path.isfile(os.path.join(folder, n)))
+
+
+def load_vsf(path, bridge_exe):
+    """Check and parse a .vsf via AESBridge.exe --vsf. Returns (result, tournament_data or None), where
+    result is the bridge's {"ok", "reason", "format", "supported", "error"} line."""
+    out_path = os.path.join(DATA_DIR, 'hosted_tournament_data.json')
+    try:
+        os.remove(out_path)
+    except OSError:
+        pass
+    try:
+        r = subprocess.run([bridge_exe, '--vsf', path, out_path], capture_output=True, text=True, timeout=60)
+        lines = [l for l in r.stdout.splitlines() if l.strip().startswith('{')]
+        result = json.loads(lines[-1]) if lines else None
+    except Exception as e:
+        return {'ok': False, 'reason': 'load_failed', 'error': f'bridge: {e}'}, None
+    if not result:
+        return {'ok': False, 'reason': 'load_failed', 'error': (r.stderr.strip() or 'no result from the bridge')[:200]}, None
+    if not result.get('ok'):
+        return result, None
+    try:
+        with open(out_path, 'r', encoding='utf-8-sig') as f:
+            return result, json.load(f)
+    except Exception as e:
+        return {'ok': False, 'reason': 'load_failed', 'error': f'parse output: {e}'}, None
+
+
+def _post_json(url, payload_obj, ingest_key, timeout, cf_headers=None):
+    """POST and return the parsed JSON response. Raises on an HTTP or network error."""
+    payload = json.dumps(payload_obj).encode('utf-8')
+    headers = {'Content-Type': 'application/json', 'User-Agent': 'aes-sync-connector/1.0'}
+    if ingest_key:
+        headers['Authorization'] = f'Bearer {ingest_key}'
+    if cf_headers:
+        headers.update(cf_headers)
+    req = urllib.request.Request(url, data=payload, method='POST', headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode('utf-8') or 'null')
+
+
+def _client_label():
+    """BUILD_LABEL in the characters the dashboard keeps (letters, digits, space . + - _), at most 40."""
+    return re.sub(r'[^\w .+-]', '', BUILD_LABEL)[:40] or None
+
+
+class RelayHost:
+    """Watches the folder and the Host in Relay switch on its own thread. `hosting` is set while Relay
+    Sync hosts the file; the AES loop in monitor() disconnects and waits while it is set."""
+
+    def __init__(self, base_url, ingest_key, timeout, cf_headers, bridge_exe, folder=None):
+        self.base_url = base_url
+        self.ingest_key = ingest_key
+        self.timeout = timeout
+        self.cf_headers = cf_headers
+        self.bridge_exe = bridge_exe
+        self.folder = folder or _BASE_DIR
+        self.hosting = threading.Event()
+        self.switch_on = False        # the dashboard's switch, as of the last /hosting answer
+        self.event_key = None         # this connector key's event (aesEventIdKey), from the same answer
+        self.loaded = None            # {'path', 'sig', 'result', 'data'} of the last file checked
+        self.hosting_since = None
+        self.last_snapshot = None
+        self.last_line = None         # the last status line printed, so only changes are logged
+        self.report_failed = False
+
+    def _say(self, line):
+        if line != self.last_line:
+            log(f"Hosting: {line}")
+            self.last_line = line
+
+    def evaluate(self, now=None):
+        """Decide the hosting state from the folder and the last known switch; start or stop hosting,
+        push a snapshot when due. Returns the report for /hosting (no file contents), or None to skip
+        this check (the file is still being written)."""
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        files = find_vsf_files(self.folder)
+        names = [os.path.basename(f) for f in files]
+        report = {'fileCount': len(files), 'fileName': names[0] if len(names) == 1 else None,
+                  'formatVersion': None, 'supportedFormat': None, 'hostingSince': None,
+                  'client': _client_label()}
+
+        if not self.switch_on or not self.event_key:
+            state = 'switch_off'
+            self._say("Host in Relay is off on the dashboard" + (f" ({names[0]} is ignored)" if len(names) == 1 else "")
+                      + " - syncing from AES.")
+        elif not files:
+            state = 'no_file'
+            self._say("Host in Relay is on, but there's no .vsf in this folder. Drop the event's file next to the config file.")
+        elif len(files) > 1:
+            state = 'multiple_files'
+            self._say(f"{len(files)} .vsf files in this folder ({', '.join(names)}). Leave only this event's file.")
+        else:
+            path = files[0]
+            try:
+                st = os.stat(path)
+            except OSError:
+                return None
+            sig = (st.st_mtime_ns, st.st_size)
+            fresh = time.time() - st.st_mtime < HOSTING_SETTLE_SECONDS
+            changed = not self.loaded or self.loaded['path'] != path or self.loaded['sig'] != sig
+            if changed and fresh:
+                return None  # still being written; look again next time
+            if changed:
+                result, data = load_vsf(path, self.bridge_exe)
+                self.loaded = {'path': path, 'sig': sig, 'result': result, 'data': data}
+            result, data = self.loaded['result'], self.loaded['data']
+            report['formatVersion'] = result.get('format') or None
+            report['supportedFormat'] = result.get('supported') or None
+            if not result.get('ok'):
+                state = 'refused_format' if result.get('reason') == 'refused_format' else 'load_failed'
+                if state == 'refused_format':
+                    self._say(f"refusing {names[0]}: format {result.get('format')} is newer than this Relay Sync's "
+                              f"AES engine opens ({result.get('supported')}). Update Relay Sync.")
+                else:
+                    self._say(f"can't read {names[0]}: {result.get('error') or 'unknown error'}")
+            elif _event_id_key(data) != self.event_key:
+                state = 'wrong_event'
+                self._say(f"refusing {names[0]}: it's a different event ({data.get('event', {}).get('name', '?')}) "
+                          f"from this config's.")
+            else:
+                state = 'hosting'
+                if not self.hosting.is_set() or changed:
+                    if not self.hosting.is_set():
+                        self.hosting_since = now
+                    ev = data.get('event', {})
+                    matches = data.get('matches', [])
+                    self.last_line = None
+                    self._say(f"HOSTING {names[0]} (format {result.get('format')}): {ev.get('name', '?')}, "
+                              f"{len(matches)} matches ({sum(1 for m in matches if m.get('decided'))} decided), "
+                              f"{len(data.get('pools', []))} pools, {len(data.get('brackets', []))} brackets, "
+                              f"{len(data.get('courts', []))} courts. AES sync paused.")
+                    self.hosting.set()
+                    self.last_snapshot = None  # push now
+                report['hostingSince'] = _utc_iso_ms(self.hosting_since)
+                if self.last_snapshot is None or (now - self.last_snapshot).total_seconds() >= SNAPSHOT_INTERVAL:
+                    push_snapshot(data, self.base_url, self.ingest_key, self.timeout, self.cf_headers,
+                                  allow_writeback=False, now=now)
+                    self.last_snapshot = now
+
+        if state != 'hosting' and self.hosting.is_set():
+            self.hosting.clear()
+            self.hosting_since = None
+            self.last_snapshot = None
+            log("Hosting: stopped - going back to syncing from AES.")
+        report['state'] = state
+        return report
+
+    def report(self, report):
+        """POST the report; adopt the switch and event key from the answer. Returns True if either changed."""
+        try:
+            answer = _post_json(self.base_url.rstrip('/') + '/hosting', report, self.ingest_key, self.timeout,
+                                self.cf_headers) or {}
+        except urllib.error.HTTPError as e:
+            if not self.report_failed:
+                log(f"hosting report HTTP {e.code}: {e.reason}" +
+                    (" (this dashboard may not support Relay hosting yet)" if e.code == 404 else ""))
+            self.report_failed = True
+            return False
+        except Exception as e:
+            if not self.report_failed:
+                log(f"hosting report failed: {e}")
+            self.report_failed = True
+            return False
+        self.report_failed = False
+        switch_on = answer.get('hostInRelay') is True
+        event_key = answer.get('aesEventIdKey') or None
+        changed = switch_on != self.switch_on or event_key != self.event_key
+        self.switch_on, self.event_key = switch_on, event_key
+        return changed
+
+    def tick(self):
+        report = self.evaluate()
+        if report is not None and self.report(report):
+            report = self.evaluate()  # the switch changed: act on it now, not in 10 seconds
+            if report is not None:
+                self.report(report)
+
+    def run(self, stop_event):
+        while not stop_event.is_set():
+            try:
+                self.tick()
+            except Exception as e:
+                log(f"Hosting check error: {e}")
+            stop_event.wait(HOSTING_CHECK_INTERVAL)
+
+
+class _HostingStarted(Exception):
+    """Raised inside the AES loop when Relay Sync starts hosting, to drop the AES connection."""
+
 # ── Main loop ──────────────────────────────────────────────────────────────────
 
 def monitor(cfg):
@@ -1457,13 +1670,27 @@ def monitor(cfg):
     print(f"  Bridge:    {bridge_exe or 'NOT FOUND'}")
     print(f"  Ingest:    {base_url or '(not configured — set in aes_config.ini)'}")
     print(f"  Write-back: {'ENABLED — dashboard corrections will be sent into AES' if allow_writeback else 'disabled (read-only)'}")
+    print(f"  Hosting:   drop the event's .vsf here and turn on Host in Relay (event Settings) to run without AES")
     print(f"  Press Ctrl+C to stop")
     print(f"{'─'*62}\n")
 
     prev_data  = None
     update_num = 0
 
+    relay_host = None
+    if base_url and ingest_key and bridge_exe:
+        relay_host = RelayHost(base_url, ingest_key, timeout, cf_headers, bridge_exe)
+        threading.Thread(target=relay_host.run, args=(threading.Event(),), daemon=True).start()
+
     while True:
+        if relay_host and relay_host.hosting.is_set():
+            # Hosting the dropped .vsf: no AES connection until it stops (switch off, file removed).
+            try:
+                while relay_host.hosting.is_set():
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                log("Shutting down."); break
+            continue
         last_snapshot = None  # reset on each new connection → always push snapshot on connect
         last_sent_pools = {}  # {playId: _pool_signature()} — re-baselined by that first snapshot
         last_sent_brackets = {}  # {playId: _bracket_signature()} — likewise
@@ -1495,6 +1722,8 @@ def monitor(cfg):
                     # Taken the moment the frame is read, before any bridge subprocess / decode work.
                     received_at = datetime.datetime.now(datetime.timezone.utc)
                 except socket.timeout:
+                    if relay_host and relay_host.hosting.is_set():
+                        raise _HostingStarted()
                     while allow_writeback and not outbox_q.empty():
                         cmd = outbox_q.get_nowait()
                         if cmd.get('type') == 'finish_ranks':
@@ -1654,6 +1883,8 @@ def monitor(cfg):
             try: sock.close()
             except: pass
             break
+        except _HostingStarted:
+            log("Disconnecting from AES: hosting the dropped .vsf instead.")
         except ConnectionError as e:
             log(f"Disconnected: {e}")
         except Exception as e:
@@ -1664,8 +1895,14 @@ def monitor(cfg):
             try: sock.close()
             except: pass
 
+        if relay_host and relay_host.hosting.is_set():
+            continue
         log("Reconnecting in 5 seconds...")
-        try: time.sleep(5)
+        try:
+            for _ in range(5):
+                if relay_host and relay_host.hosting.is_set():
+                    break
+                time.sleep(1)
         except KeyboardInterrupt:
             log("Shutting down."); break
 

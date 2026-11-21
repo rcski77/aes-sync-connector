@@ -124,6 +124,12 @@ The monitor posts to two endpoints. Auth: `Authorization: Bearer <ingest_key>`.
 |---|---|---|
 | `POST /api/ingest/delta` | Every score entry with set scores | Single match result (with `observedAt`, when the connector read it from AES) |
 | `POST /api/ingest/snapshot` | On connect, then every 3 minutes | Full tournament state |
+| `POST /api/ingest/hosting` | Every 10 seconds | Relay hosting state (no file contents); answers with the Host in Relay switch |
+
+**Relay hosting (read-only).** With the event's Host in Relay switch on and exactly one `.vsf` of that event
+next to the config file, Relay Sync runs without AES: it parses the file through the bridge (`--vsf`) and posts
+snapshots from it instead of connecting to the Scheduler. Turning the switch off or removing the file goes back
+to the AES sync. See `monitor/CLAUDE.md`, "Relay hosting".
 
 See `CLAUDE.md` for full payload schemas.
 

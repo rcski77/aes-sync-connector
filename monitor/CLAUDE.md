@@ -88,6 +88,30 @@ All bytes are decrypted via the inbound cipher state before parsing.
 
 ---
 
+## Relay hosting (read-only, phase 1)
+
+The dashboard's `docs/plans/relay-hosting-plan.md` (ADR-023). `RelayHost` in aes_monitor.py runs on its own
+daemon thread from startup (when the config has an endpoint, a key and the bridge was found):
+
+- Every `HOSTING_CHECK_INTERVAL` (10 s) it looks for `*.vsf` directly in the exe folder (next to the config file),
+  decides a state and POSTs it to `{endpoint}/hosting` (`_post_json`). The answer carries `hostInRelay` (the
+  event's switch on the dashboard's Settings screen) and `aesEventIdKey` (the event the key belongs to). When
+  either changes it re-evaluates at once instead of waiting 10 s.
+- States: `switch_off`, `no_file`, `multiple_files`, `refused_format`, `load_failed`, `wrong_event`, `hosting`.
+  Only the file name, count, format numbers, `hostingSince` and the build label are reported, never contents.
+- With the switch on and exactly one file, it checks the file through `AESBridge.exe --vsf` (`load_vsf`; again
+  only when the file's mtime/size change, and not while it was modified in the last 2 s), then compares
+  `_event_id_key()` of the parsed file with the dashboard's `aesEventIdKey` (event id, or the name for a
+  hand-built event, as for every other push).
+- Hosting: sets `relay_host.hosting`, prints the event name, counts and format, and calls `push_snapshot`
+  (`writebackEnabled: false`) on start, whenever the file changes, and every `SNAPSHOT_INTERVAL`, so the
+  dashboard keeps seeing a live connector.
+- `monitor()`'s AES loop checks `relay_host.hosting` every second (the `socket.timeout` branch raises
+  `_HostingStarted`), drops the AES connection and waits while hosting. Anything short of `hosting` (switch
+  off, file removed, a refused file) clears it and the AES loop reconnects as before.
+- No edits, no publishing, no connection to AES's servers. A dashboard without `/hosting` answers 404: logged
+  once, the switch stays off and the AES sync runs as before.
+
 ## AESBridge Invocation
 
 ```python
