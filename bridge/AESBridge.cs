@@ -41,6 +41,26 @@ class AESBridge
             if (args.Length >= 1 && args[0] == "--encode-finish")
                 return EncodeFinishData(args.Skip(1).ToArray());
 
+            // --roundtrip / --edit: save a .vsf back through AES's own code (VsfEditTool.cs).
+            // Test modes only; the monitor never calls them.
+            if (args.Length >= 1 && args[0] == "--roundtrip")
+                return VsfEditTool.RoundTrip(args.Skip(1).ToArray());
+            if (args.Length >= 1 && args[0] == "--edit")
+                return VsfEditTool.Edit(args.Skip(1).ToArray());
+            if (args.Length >= 1 && args[0] == "--ids")
+                return VsfEditTool.Ids(args.Skip(1).ToArray());
+
+            // --publish: spike, publishes a .vsf to AES's servers like the Scheduler's Update Now (Publish.cs).
+            // The only mode that opens a network connection; asks for the AES login at the console.
+            if (args.Length >= 1 && args[0] == "--publish")
+                return Publish.Run(args.Skip(1).ToArray());
+
+            // --host-batch / --plays: headless host-loop spike (HostBatch.cs). Never touches the network.
+            if (args.Length >= 1 && args[0] == "--host-batch")
+                return HostBatch.Run(args.Skip(1).ToArray());
+            if (args.Length >= 1 && args[0] == "--plays")
+                return HostBatch.Plays(args.Skip(1).ToArray());
+
             byte[] data;
             if (args.Length > 0 && File.Exists(args[0]))
                 data = File.ReadAllBytes(args[0]);
