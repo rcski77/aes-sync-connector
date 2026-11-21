@@ -531,15 +531,17 @@ both his sample data and this project's own real event data (eventId `45029` →
 
 ---
 
-## Relay hosting (read-only)
+## Relay hosting
 
 Phase 1 of the dashboard's `docs/plans/relay-hosting-plan.md` (ADR-023): with the event's **Host in Relay**
 switch on (dashboard Settings screen) and exactly one `.vsf` of that event next to the config file, Relay Sync
 stops connecting to AES and posts `/snapshot` from the file (bridge `--vsf`), on start, whenever the file changes
 and every 3 minutes. It reports its state every 10 s to `POST {endpoint}/hosting` and gets the switch back
 (contract: the dashboard's `docs/reference/ingest-api.md`, "Relay hosting"). Details in `monitor/CLAUDE.md`,
-"Relay hosting". No edits or publishing yet; the file never leaves the laptop. `*.vsf` is gitignored: never
-commit one (club contacts, officials' records).
+"Relay hosting". Phase 2 publishes the hosted file to AES's results site (bridge `--publish-json`) every 3–60
+minutes and on Publish now, with the AES login saved on the laptop (DPAPI), reads it back from AES's public API,
+and stops on another publisher; see monitor/CLAUDE.md. No edits from the dashboard yet (phase 3); the file never
+reaches Relay's servers. `*.vsf` is gitignored: never commit one (club contacts, officials' records).
 
 ## Dashboard Outbox API (score write-back)
 
