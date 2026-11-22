@@ -26,7 +26,8 @@ if errorlevel 1 (
 )
 
 :: Ensure PyInstaller is installed
-python -m pip install --quiet pyinstaller pycryptodome
+:: tzdata: Windows has no IANA time zone database; zoneinfo needs this package, bundled below (--collect-data).
+python -m pip install --quiet pyinstaller pycryptodome tzdata
 if errorlevel 1 (
     echo ERROR: pip install failed. Make sure Python is on your PATH.
     pause & exit /b 1
@@ -47,6 +48,8 @@ echo Build: local %BUILD_SHA% (%BUILD_BRANCH%%BUILD_DIRTY%), built %BUILD_DATE%
 :: Build single-file exe
 python -m PyInstaller ^
     --onefile ^
+    --collect-data tzdata ^
+    --hidden-import tzdata ^
     --name "Relay Sync" ^
     --console ^
     --distpath build\exe ^

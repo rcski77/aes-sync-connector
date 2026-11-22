@@ -34,11 +34,13 @@ jobs:
           dotnet build bridge/AESBridge.csproj -c Release --nologo -v quiet
           if ($LASTEXITCODE -ne 0) { throw "AESBridge build failed" }
 
-          python -m pip install --quiet pycryptodome pyinstaller==6.21.0
+          # tzdata: Windows has no IANA time zone database, so zoneinfo ("America/New_York") needs this package,
+          # bundled into the exe below (--collect-data). Without it a hosted court move fails on the built exe.
+          python -m pip install --quiet pycryptodome tzdata pyinstaller==6.21.0
           # The label the monitor prints at startup - the same name as the release published below.
           $sha = git rev-parse --short HEAD
           "BUILD = `"build-${{ github.run_number }}-$sha`"" | Out-File -Encoding utf8NoBOM monitor/_build_info.py
-          python -m PyInstaller --onefile --name "Relay Sync" --console `
+          python -m PyInstaller --onefile --name "Relay Sync" --console --collect-data tzdata --hidden-import tzdata `
             --distpath out/exe --workpath out/build --specpath out/build monitor/aes_monitor.py
           if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
