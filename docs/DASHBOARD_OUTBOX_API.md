@@ -19,7 +19,7 @@ takes no remote update for those).
 **Capabilities.** Every snapshot also carries `"capabilities": [...]`, the
 outbox command forms this connector build supports beyond the originals.
 Currently `"finish_ranks_clear"` (`finish_ranks` entries with `rank: null`, see
-below). A missing field means an older connector with none of them.
+below) and `"match_move"` (court moves, applied only while hosting a `.vsf`; below). A missing field means an older connector with none of them.
 
 **Check `writebackEnabled` before showing any correction UI.** Every
 `/api/ingest/snapshot` payload (the connector's existing full-state push, sent
@@ -154,6 +154,19 @@ What the connector does with it:
    doesn't echo an update back to the client that sent it.
 5. **Ack.** A play not in the cache yet, or no tournament file ID yet, is
    `failed` (transient).
+
+### `match_move` commands (Relay hosting only)
+
+```json
+{ "id": "cmd_jkl012", "type": "match_move", "matchId": -50030, "courtId": -50033,
+  "courtName": "Court 1", "start": "2026-10-31T18:00", "createdAt": "...", "requestedBy": "staff" }
+```
+
+Queued by the dashboard only while this connector hosts the event's `.vsf` (AES's live protocol has no move
+message), and only for a build listing `"match_move"`. `start` is an Eastern wall-clock time; the match keeps its
+length. Applied with the batch's other commands through `AESBridge.exe --host-apply` (`move`, AES's
+`Court.ScheduleMatch`). Acks: `applied`; `rejected` for a match or court the file doesn't have, a played match, or a
+slot another match holds (AES's reason). See monitor/CLAUDE.md, "Relay hosting: court moves".
 
 ## POST /api/ingest/outbox/{id}/ack
 Auth: same Bearer key. Sent once per command, after the connector has

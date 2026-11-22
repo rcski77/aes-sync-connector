@@ -540,8 +540,9 @@ and every 3 minutes. It reports its state every 10 s to `POST {endpoint}/hosting
 (contract: the dashboard's `docs/reference/ingest-api.md`, "Relay hosting"). Details in `monitor/CLAUDE.md`,
 "Relay hosting". Phase 2 publishes the hosted file to AES's results site (bridge `--publish-json`) every 3–60
 minutes and on Publish now, with the AES login saved on the laptop (DPAPI), reads it back from AES's public API,
-and stops on another publisher; see monitor/CLAUDE.md. No edits from the dashboard yet (phase 3); the file never
-reaches Relay's servers. `*.vsf` is gitignored: never commit one (club contacts, officials' records).
+and stops on another publisher; see monitor/CLAUDE.md. Phase 3 applies the dashboard's scores and finishes to Relay's
+own copy as change batches (bridge `--host-apply`), with versions in `data/versions/`; phase 4 adds court moves
+(`match_move`). The file never reaches Relay's servers. `*.vsf` is gitignored: never commit one (club contacts, officials' records).
 
 ## Dashboard Outbox API (score write-back)
 
