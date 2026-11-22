@@ -1134,6 +1134,10 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
         'pools':         pools,
         'brackets':      brackets,
         'divisions':     [_division_payload(d) for d in tournament_data.get('divisions', [])],
+        # Every court in the file, with or without matches, so the dashboard shows empty courts (and the move editor
+        # can target one); it otherwise only learns a court from its matches.
+        'courts':        [{'courtId': c['courtId'], 'name': c['name']} for c in tournament_data.get('courts', [])
+                          if isinstance(c.get('courtId'), int) and c.get('name')],
     }
     url = base_url.rstrip('/') + '/snapshot'
     if sync:  # Relay hosting: the snapshot must land before the batch's commands are acked

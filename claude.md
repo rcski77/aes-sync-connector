@@ -480,7 +480,10 @@ Full tournament state — dashboard upserts everything and deletes absences.
         "team": "Loser of R3 EliteChampM4",    // the team (seedless, like every other name) once
         "teamCode": null }                     // resolved, else AES's slot text; teamCode null = slot
     ]
-  }]
+  }],
+  "courts": [                         // every court in the file, with or without matches (since 2026-11-22),
+    { "courtId": -50033, "name": "Court 1" }  // so the dashboard shows empty courts and the move editor can
+  ]                                   // target one; older dashboards ignore it
 }
 ```
 
