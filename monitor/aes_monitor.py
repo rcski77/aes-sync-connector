@@ -141,7 +141,9 @@ REMOTE_FINISH_DATA       = '33282'   # pool finish ranks set/cleared
 # Outbox command forms this build supports beyond the original ones, sent as
 # `capabilities` on every /snapshot so the dashboard only queues what we can apply.
 #   finish_ranks_clear: finish_ranks entries with "rank": null clear that team's rank.
-CAPABILITIES = ('finish_ranks_clear',)
+#   match_move: court moves, applied while hosting a .vsf (Relay hosting phase 4; AES has no live message for one).
+#   score_clear: score_correction with "clear": true (the result removed), applied while hosting a .vsf only.
+CAPABILITIES = ('finish_ranks_clear', 'match_move', 'score_clear')
 
 OUTCOMES = {
     '0': 'Undecided', '1': 'FirstTeamWon', '2': 'SecondTeamWon',
@@ -409,6 +411,9 @@ def send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe):
         return 'failed', 'AESBridge.exe not available', None
     if not file_id:
         return 'failed', 'fileId not yet captured — waiting for first EventUpdate', None
+    if cmd.get('clear'):
+        # Only Relay hosting clears a result (the dashboard offers it only then); a live AES has no tested way to take one.
+        return 'rejected', 'clearing a score works only while Relay Sync hosts the event', None
     try:
         args = _merge_for_encode(cmd, tournament_data, file_id)
     except Exception as e:
@@ -2038,6 +2043,39 @@ def _play_label(kind, play):
     return f"{play.get('divisionCode') or ''} {name}".strip()
 
 
+def _file_clock(wall):
+    """The dashboard's Eastern wall-clock time ('yyyy-mm-ddTHH:mm') on the clock the hosted file keeps, as the
+    bridge's move takes it: the inverse of _eastern_naive, which reads the file's times as this computer's local time.
+    On a laptop set to Eastern it is the same text."""
+    import datetime as _dt
+    naive = _dt.datetime.strptime(wall, '%Y-%m-%dT%H:%M')
+    try:
+        from zoneinfo import ZoneInfo
+        local = naive.replace(tzinfo=ZoneInfo('America/New_York')).astimezone().replace(tzinfo=None)
+    except ImportError:
+        local = naive
+    return local.strftime('%Y-%m-%dT%H:%M')
+
+
+def _move_change(cmd, work):
+    """A match_move command (Relay hosting phase 4) as a --host-apply 'move'. Updates `work` in place, so a later move
+    in the same batch sees this one. The bridge refuses a slot another match holds (AES's own drag would bump it)."""
+    match_id = int(cmd['matchId'])
+    m = next((x for x in work.get('matches', []) if x.get('matchId') == match_id), None)
+    if m is None:
+        raise LookupError(f'match {abs(match_id)} is not in the hosted file')
+    court = next((c for c in work.get('courts', []) if c.get('courtId') == int(cmd['courtId'])), None)
+    if court is None:
+        raise LookupError(f"court {cmd.get('courtName') or cmd['courtId']} is not in the hosted file")
+    start = _file_clock(str(cmd['start']))
+    if m.get('decided'):
+        raise LookupError(f'match {abs(match_id)} has been played')
+    m['courtId'], m['courtName'] = court['courtId'], court['name']
+    label = f"{m.get('divisionCode') or ''} {m.get('shortName') or abs(match_id)}".strip()
+    return ({'op': 'move', 'match': match_id, 'court': court['name'], 'start': start},
+            f"{label}: moved to {court['name']} at {start[11:16]}")
+
+
 def command_change(cmd, work):
     """One outbox command as a --host-apply change, merged with `work` (the latest version's parse, updated in place
     as finishes are merged, so a second command for the same play builds on the first). Returns (change, summary);
@@ -2055,11 +2093,17 @@ def command_change(cmd, work):
         what = 'finishes cleared' if not ranks else \
             f"finish {ranks[0]} set" if len(ranks) == 1 else f"finishes {ranks[0]}-{ranks[-1]} set"
         return {'op': 'finish', 'play': int(cmd['playId']), 'ranks': final}, f"{label}: {what}{auto}"
+    if cmd.get('type') == 'match_move':
+        return _move_change(cmd, work)
     if cmd.get('type', 'score_correction') == 'score_correction':
         match_id = int(cmd['matchId'])
         m = next((x for x in work.get('matches', []) if x.get('matchId') == match_id), None)
         if m is None:
             raise LookupError(f'match {abs(match_id)} is not in the hosted file')
+        if cmd.get('clear'):
+            # Clear the result (Score Entry's "Clear scores"): AES's score entry with outcome Undecided and no sets.
+            label = f"{m.get('divisionCode') or ''} {m.get('shortName') or abs(match_id)}".strip()
+            return {'op': 'score', 'match': match_id, 'clear': True}, f"{label}: score cleared{auto}"
         sets = cmd.get('sets')
         if sets is None:
             sets = m.get('sets') or []

@@ -185,6 +185,24 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
   name), `conflictAt`, `conflictChoiceHandled`, `publishVersionHandled`. Stamps already on the answer when hosting
   starts count as handled.
 
+## Relay hosting: court moves (phase 4)
+
+- `match_move` commands (dashboard: `{matchId, courtId, courtName, start}`, `start` an Eastern wall-clock time
+  `yyyy-mm-ddTHH:mm`) come only while hosting: AES's live protocol has no move message. The snapshot's `capabilities`
+  list `match_move`, so the dashboard offers its editor only to this build.
+- `_move_change` (called from `command_change`) maps one to a `--host-apply` `move` (court by `courtId` in the parse,
+  start through `_file_clock`, the inverse of `_eastern_naive`), updating the batch's working parse so a later move in
+  the same batch sees it. A match or court the file doesn't have, or a played match, is acked `rejected`. AES's model
+  refuses a slot another match holds (the bridge never bumps one, unlike AES's own drag); that comes back as
+  `rejected` with AES's reason, the rest of the batch applied.
+- Moves of a group arrive created in the order they must be applied (the dashboard's `orderMoves`: each after the one
+  leaving its slot), and the batcher keeps that order.
+- `score_clear` capability: a `score_correction` with `"clear": true` becomes a `score` change with `clear` (bridge: AES's
+  MatchData with outcome Undecided and no sets), summary "score cleared". Only while hosting; the live path
+  (`send_score_correction`) acks it `rejected`.
+- A batch with a move is a new version (`keep` in `RelayBatcher.apply`), its change line "<division> <match>: moved
+  to <court> at HH:MM". No other behaviour changed.
+
 ## AESBridge Invocation
 
 ```python
