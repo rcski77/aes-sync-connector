@@ -56,7 +56,7 @@ jobs:
           Copy-Item bridge/bin/Release/net48/EventScheduler_Release.exe "$root/app/"
           Copy-Item monitor/aes_config.ini.example "$root/app/"
           Copy-Item monitor/README.txt "$root/README.txt"
-          (Get-Content "$root/README.txt" -Raw) -replace '\{BUILD\}', $sha | Out-File -Encoding utf8 "$root/README.txt"
+          (Get-Content "$root/README.txt" -Raw) -replace '\{BUILD\}', "build-${{ github.run_number }}-$sha" | Out-File -Encoding utf8 "$root/README.txt"
 
           Compress-Archive -Path $root -DestinationPath out/aes-sync-connector.zip -Force
 
