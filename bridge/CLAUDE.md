@@ -306,6 +306,7 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
   // Relay hosting phase 4b (ReseedFeed.cs): one entry per round with a flagged reseed rank, AES's own values.
   "reseeds": [{
     "roundId", "roundShortName", "roundName", "roundIndex", "divisionCode", "divisionName", "divisionId",
+    "divisionRounds": [{ "roundId", "shortName", "index" }],  // the age group's rounds in AES's order (names can repeat)
     "plays": [{ "playId", "kind", "shortName", "teamCount",
                 "reseedRanks",   // finish ranks flagged RankWillBeReseeded
                 "rankSeeds",     // rankSeeds[r-1] = SortedSeeds[r-1], the seed a team finishing r exits with
@@ -315,6 +316,7 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
                 "reseedSeed", "exitSeed", "teamCode", "team", "club", "region",
                 "matchesWon", "matchesLost", "setsWon", "setsLost", "pointsFor", "pointsAgainst",
                 "matchPercent", "setPercent", "pointRatio" }],  // TeamStats; null where AES's is NaN
+    "played",            // [[codeA, codeB]]: decided matches in this age group's rounds up to and including this one
     "seedsOnOffer",      // Round.ActualReseedingSeeds
     "suggestedOrder",    // Round.SuggestedReseedOrder as [{ playId, teamNumber }]
     "next": [{ "playId", "roundId", "kind", "shortName", "fullName",

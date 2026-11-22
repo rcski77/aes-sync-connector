@@ -209,7 +209,9 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
 - The parse carries `reseeds[]` (bridge `ReseedFeed.cs`, AES's own model): per round with flagged reseed ranks, the
   plays (flagged ranks, the seed each rank exits with, bracket matches), the reseeding teams (natural seed
   `ExitSeedIgnoringReseed`, `ReseedSeed`, record and AES's match %, set %, point ratio, club, region, team code; plus
-  any team still holding a seed it no longer reseeds with), `seedsOnOffer` (`ActualReseedingSeeds`),
+  any team still holding a seed it no longer reseeds with), `divisionRounds` (the age group's rounds in AES's order,
+  as names can repeat), `played` (pairs with a decided match in the age group's rounds up to and including this one:
+  the dashboard's replays), `seedsOnOffer` (`ActualReseedingSeeds`),
   `suggestedOrder` (`SuggestedReseedOrder`) and `next` (the plays the seeds enter, slots and matches). `push_snapshot`
   sends it as `reseeds`; the dashboard stores it per round and builds its Reseeds screen from it.
 - `reseed` commands (`{roundId, label, teams: [{playId, teamNumber, seed}]}`) come only while hosting. `_reseed_change`

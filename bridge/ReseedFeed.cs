@@ -3,6 +3,7 @@
  *
  * One entry per round that has reseeds (a play in it with a finish rank flagged RankWillBeReseeded), read from
  * AES's own model so the dashboard never re-derives AES's rules:
+ *   - divisionRounds: every round of the age group (id, short name, position), as rounds can share a name.
  *   - plays:    the round's plays with reseeds: kind, the flagged ranks and the seed each rank exits with
  *               (rankSeeds[r-1] = Play.SortedSeeds[r-1], what ExitSeedIgnoringReseed gives a team at rank r).
  *               Brackets add their matches (sides as slot / winnerOf / loserOf) for the elimination rank blocks.
@@ -10,6 +11,7 @@
  *               ReseedSeed it no longer reseeds with (a finish changed after the reseed): natural seed
  *               (ExitSeedIgnoringReseed), ReseedSeed, ExitSeed, record and AES's match %, set %, point ratio
  *               (Play.TeamAssignment.TeamStats, null where AES's would be NaN), club, region, team code.
+ *   - played:   team-code pairs with a decided match in the age group's rounds up to and including this one (replays).
  *   - seedsOnOffer: Round.ActualReseedingSeeds. suggestedOrder: Round.SuggestedReseedOrder as play/slot pairs.
  *   - next:     the plays the reseeded seeds enter (Division.GetNextPlayForSeed: the first later round with a slot
  *               of that entry seed), every slot with its entry seed and current team (null while pending), and
@@ -63,6 +65,11 @@ static class ReseedFeed
         sb.Append($"\"divisionCode\": {S(d.CodeAlias ?? "")}, ");
         sb.Append($"\"divisionName\": {S(d.DescriptionAlias ?? "")}, ");
         sb.Append($"\"divisionId\": {d.EventDivisionAssignmentID}, ");
+        // Every round of the age group in AES's order, so the dashboard can tell apart two rounds both named "R2".
+        sb.Append("\"divisionRounds\": [");
+        sb.Append(string.Join(", ", d.Rounds.Select(x =>
+            $"{{\"roundId\": {x.RoundID}, \"shortName\": {S((x.ShortName ?? "").Trim())}, \"index\": {AESBridge.RoundIndex(x)}}}")));
+        sb.Append("], ");
 
         // Plays with reseeds.
         sb.Append("\"plays\": [");
@@ -90,6 +97,23 @@ static class ReseedFeed
         sb.Append("\"teams\": [");
         sb.Append(string.Join(", ", reseeding.Select(t => TeamJson(t, true)).Concat(stale.Select(t => TeamJson(t, false)))));
         sb.Append("], ");
+
+        // Replays: the pairs that played each other (a decided match) in this age group's rounds up to and including this
+        // one, by AES's round order. The next round and later ones are what's being planned, so they never count.
+        int index = AESBridge.RoundIndex(r);
+        var played = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (Round x in d.Rounds)
+        {
+            if (AESBridge.RoundIndex(x) > index) continue;
+            foreach (Match m in x.Matches)
+            {
+                if (m.TypeOfOutcome == Match.OutcomeType.Undecided) continue;
+                string a = AESBridge.TeamCode(m.FirstTeam), b = AESBridge.TeamCode(m.SecondTeam);
+                if (a == null || b == null || a == b) continue;
+                played.Add(string.CompareOrdinal(a, b) < 0 ? S(a) + ", " + S(b) : S(b) + ", " + S(a));
+            }
+        }
+        sb.Append("\"played\": [" + string.Join(", ", played.Select(x => "[" + x + "]")) + "], ");
 
         sb.Append($"\"seedsOnOffer\": [{string.Join(", ", r.ActualReseedingSeeds)}], ");
         sb.Append("\"suggestedOrder\": [");
