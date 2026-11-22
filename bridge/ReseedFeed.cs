@@ -82,6 +82,9 @@ static class ReseedFeed
             ps.Append($"\"playId\": {p.PlayID}, ");
             ps.Append($"\"kind\": {S(p is Pool ? "pool" : "bracket")}, ");
             ps.Append($"\"shortName\": {S(p.CompleteShortName ?? "")}, ");
+            // The play's group (Play.OwningGroup): a round's pools reseed per group, e.g. "Club" and "Prime" 2nds apart.
+            ps.Append($"\"groupId\": {N(p.OwningGroup?.GroupID)}, ");
+            ps.Append($"\"groupName\": {S(AESBridge.Blank2Null(p.OwningGroup?.ShortName) ?? AESBridge.Blank2Null(p.OwningGroup?.FullName))}, ");
             ps.Append($"\"teamCount\": {teams.Length}, ");
             ps.Append($"\"reseedRanks\": [{string.Join(", ", ranks)}], ");
             ps.Append($"\"rankSeeds\": [{string.Join(", ", seeds.Select(N))}]");

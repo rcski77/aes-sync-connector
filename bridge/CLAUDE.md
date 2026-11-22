@@ -307,7 +307,7 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
   "reseeds": [{
     "roundId", "roundShortName", "roundName", "roundIndex", "divisionCode", "divisionName", "divisionId",
     "divisionRounds": [{ "roundId", "shortName", "index" }],  // the age group's rounds in AES's order (names can repeat)
-    "plays": [{ "playId", "kind", "shortName", "teamCount",
+    "plays": [{ "playId", "kind", "shortName", "groupId", "groupName", "teamCount",   // group: Play.OwningGroup
                 "reseedRanks",   // finish ranks flagged RankWillBeReseeded
                 "rankSeeds",     // rankSeeds[r-1] = SortedSeeds[r-1], the seed a team finishing r exits with
                 "matches" }],    // brackets only: [{ matchId, shortName, a, b, start, decided }], a side {slot}|{winnerOf}|{loserOf}
