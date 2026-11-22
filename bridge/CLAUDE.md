@@ -310,10 +310,10 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "plays": [{ "playId", "kind", "shortName", "teamCount",
                 "reseedRanks",   // finish ranks flagged RankWillBeReseeded
                 "rankSeeds",     // rankSeeds[r-1] = SortedSeeds[r-1], the seed a team finishing r exits with
-                "matches" }],    // brackets only: [{ matchId, shortName, a, b, decided }], a side {slot}|{winnerOf}|{loserOf}
+                "matches" }],    // brackets only: [{ matchId, shortName, a, b, start, decided }], a side {slot}|{winnerOf}|{loserOf}
     "teams": [{ "playId", "teamNumber", "reseeding", "entrySeed", "finishRank",
                 "naturalSeed",   // ExitSeedIgnoringReseed
-                "reseedSeed", "exitSeed", "teamCode", "team", "club", "region",
+                "reseedSeed", "exitSeed", "teamCode", "lostMatchId", "team", "club", "region",  // lostMatchId: brackets
                 "matchesWon", "matchesLost", "setsWon", "setsLost", "pointsFor", "pointsAgainst",
                 "matchPercent", "setPercent", "pointRatio" }],  // TeamStats; null where AES's is NaN
     "played",            // [[codeA, codeB]]: decided matches in this age group's rounds up to and including this one

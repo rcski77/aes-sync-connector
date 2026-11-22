@@ -168,6 +168,15 @@ static class ReseedFeed
         sb.Append($"\"reseedSeed\": {N(t.ReseedSeed)}, ");
         sb.Append($"\"exitSeed\": {N(t.ExitSeed)}, ");
         sb.Append($"\"teamCode\": {S(AESBridge.TeamCode(t))}, ");
+        // A bracket team's losing match (its finish came from it): the dashboard splits a round of losers by the time of
+        // these matches when they didn't all start together.
+        int? lostMatchId = null;
+        if (t.OwningPlay is Bracket)
+        {
+            try { lostMatchId = t.OwningPlay.Matches.FirstOrDefault(m => !m.IsFromPlayoffBracket && m.TypeOfOutcome != Match.OutcomeType.Undecided && m.LosingTeam == t)?.MatchID; }
+            catch { }
+        }
+        sb.Append($"\"lostMatchId\": {N(lostMatchId)}, ");
         sb.Append($"\"team\": {S(name)}, ");
         sb.Append($"\"club\": {S(AESBridge.Blank2Null(club?.Name))}, ");
         sb.Append($"\"region\": {S(AESBridge.Blank2Null(club?.RegionAbbr))}, ");
@@ -213,6 +222,7 @@ static class ReseedFeed
             $"{{\"matchId\": {m.MatchID}, \"shortName\": {S(m.CompleteShortName ?? "")}, " +
             $"\"a\": {Side(m.FirstTypeOfCompetingTeam, m.FirstTeamNumber, m.FirstTeamSourceMatch)}, " +
             $"\"b\": {Side(m.SecondTypeOfCompetingTeam, m.SecondTeamNumber, m.SecondTeamSourceMatch)}, " +
+            $"\"start\": {S(m.IsScheduled ? m.ScheduledStartDateTime.ToString("yyyy-MM-ddTHH:mm", CultureInfo.InvariantCulture) : null)}, " +
             $"\"decided\": {B(m.TypeOfOutcome != Match.OutcomeType.Undecided)}}}")) + "]";
     }
 
