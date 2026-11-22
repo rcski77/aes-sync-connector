@@ -203,6 +203,20 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
 - A batch with a move is a new version (`keep` in `RelayBatcher.apply`), its change line "<division> <match>: moved
   to <court> at HH:MM". No other behaviour changed.
 
+
+## Relay hosting: reseeds (phase 4b)
+
+- The parse carries `reseeds[]` (bridge `ReseedFeed.cs`, AES's own model): per round with flagged reseed ranks, the
+  plays (flagged ranks, the seed each rank exits with, bracket matches), the reseeding teams (natural seed
+  `ExitSeedIgnoringReseed`, `ReseedSeed`, record and AES's match %, set %, point ratio, club, region, team code; plus
+  any team still holding a seed it no longer reseeds with), `seedsOnOffer` (`ActualReseedingSeeds`),
+  `suggestedOrder` (`SuggestedReseedOrder`) and `next` (the plays the seeds enter, slots and matches). `push_snapshot`
+  sends it as `reseeds`; the dashboard stores it per round and builds its Reseeds screen from it.
+- `reseed` commands (`{roundId, label, teams: [{playId, teamNumber, seed}]}`) come only while hosting. `_reseed_change`
+  maps one to a `--host-apply` `reseed-tier` (one tier, whole: clear, then set each); a team that isn't reseeding in
+  the parse is acked `rejected`. The bridge refuses seeds that aren't exactly the named teams' own natural seeds, so a
+  tier never takes another tier's seed. Summary: "18 & Under R1 2nds: reseeded, seeds 34-51" (no team names). A batch
+  with a reseed is a new version. Capability `reseed`.
 ## AESBridge Invocation
 
 ```python

@@ -19,7 +19,8 @@ takes no remote update for those).
 **Capabilities.** Every snapshot also carries `"capabilities": [...]`, the
 outbox command forms this connector build supports beyond the originals.
 Currently `"finish_ranks_clear"` (`finish_ranks` entries with `rank: null`, see
-below), `"match_move"` (court moves, applied only while hosting a `.vsf`; below) and `"score_clear"`
+below), `"match_move"` (court moves, applied only while hosting a `.vsf`; below), `"reseed"` (one reseed tier, only
+while hosting; below) and `"score_clear"`
 (`score_correction` with `"clear": true`, `outcome` `"Undecided"` and no sets: the result removed; only while hosting,
 a live AES acks it `rejected`). A missing field means an older connector with none of them.
 
@@ -169,6 +170,20 @@ message), and only for a build listing `"match_move"`. `start` is an Eastern wal
 length. Applied with the batch's other commands through `AESBridge.exe --host-apply` (`move`, AES's
 `Court.ScheduleMatch`). Acks: `applied`; `rejected` for a match or court the file doesn't have, a played match, or a
 slot another match holds (AES's reason). See monitor/CLAUDE.md, "Relay hosting: court moves".
+
+### `reseed` commands (Relay hosting only)
+
+```json
+{ "id": "cmd_mno345", "type": "reseed", "roundId": -53796, "label": "18 & Under R1 2nds",
+  "teams": [{ "playId": -54863, "teamNumber": 1, "seed": 52 }, ...], "createdAt": "...", "requestedBy": "staff" }
+```
+
+One tier of one round's reseed, whole: each team (play and AES slot) gets `seed`; every `seed` null clears the tier.
+Queued only while this connector hosts the `.vsf`, for a build listing `"reseed"`. Applied with the batch through
+`AESBridge.exe --host-apply` (`reseed-tier`: clears the named teams' `ReseedSeed` and any other holder of those seeds
+in the round, then sets each). The batch becomes a new version. Acks: `applied`; `rejected` for a round the file has
+no reseeds in, a team that isn't reseeding now (its finish changed), or seeds that aren't exactly the teams' own
+natural seeds (AES's reason). See monitor/CLAUDE.md, "Relay hosting: reseeds".
 
 ## POST /api/ingest/outbox/{id}/ack
 Auth: same Bearer key. Sent once per command, after the connector has
