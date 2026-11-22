@@ -19,7 +19,9 @@ takes no remote update for those).
 **Capabilities.** Every snapshot also carries `"capabilities": [...]`, the
 outbox command forms this connector build supports beyond the originals.
 Currently `"finish_ranks_clear"` (`finish_ranks` entries with `rank: null`, see
-below) and `"match_move"` (court moves, applied only while hosting a `.vsf`; below). A missing field means an older connector with none of them.
+below), `"match_move"` (court moves, applied only while hosting a `.vsf`; below) and `"score_clear"`
+(`score_correction` with `"clear": true`, `outcome` `"Undecided"` and no sets: the result removed; only while hosting,
+a live AES acks it `rejected`). A missing field means an older connector with none of them.
 
 **Check `writebackEnabled` before showing any correction UI.** Every
 `/api/ingest/snapshot` payload (the connector's existing full-state push, sent

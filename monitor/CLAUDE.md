@@ -195,6 +195,11 @@ daemon thread from startup (when the config has an endpoint, a key and the bridg
   the same batch sees it. A match or court the file doesn't have, or a played match, is acked `rejected`. AES's model
   refuses a slot another match holds (the bridge never bumps one, unlike AES's own drag); that comes back as
   `rejected` with AES's reason, the rest of the batch applied.
+- Moves of a group arrive created in the order they must be applied (the dashboard's `orderMoves`: each after the one
+  leaving its slot), and the batcher keeps that order.
+- `score_clear` capability: a `score_correction` with `"clear": true` becomes a `score` change with `clear` (bridge: AES's
+  MatchData with outcome Undecided and no sets), summary "score cleared". Only while hosting; the live path
+  (`send_score_correction`) acks it `rejected`.
 - A batch with a move is a new version (`keep` in `RelayBatcher.apply`), its change line "<division> <match>: moved
   to <court> at HH:MM". No other behaviour changed.
 

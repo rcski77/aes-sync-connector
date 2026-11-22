@@ -142,7 +142,8 @@ REMOTE_FINISH_DATA       = '33282'   # pool finish ranks set/cleared
 # `capabilities` on every /snapshot so the dashboard only queues what we can apply.
 #   finish_ranks_clear: finish_ranks entries with "rank": null clear that team's rank.
 #   match_move: court moves, applied while hosting a .vsf (Relay hosting phase 4; AES has no live message for one).
-CAPABILITIES = ('finish_ranks_clear', 'match_move')
+#   score_clear: score_correction with "clear": true (the result removed), applied while hosting a .vsf only.
+CAPABILITIES = ('finish_ranks_clear', 'match_move', 'score_clear')
 
 OUTCOMES = {
     '0': 'Undecided', '1': 'FirstTeamWon', '2': 'SecondTeamWon',
@@ -410,6 +411,9 @@ def send_score_correction(cmd, cout, tournament_data, file_id, bridge_exe):
         return 'failed', 'AESBridge.exe not available', None
     if not file_id:
         return 'failed', 'fileId not yet captured — waiting for first EventUpdate', None
+    if cmd.get('clear'):
+        # Only Relay hosting clears a result (the dashboard offers it only then); a live AES has no tested way to take one.
+        return 'rejected', 'clearing a score works only while Relay Sync hosts the event', None
     try:
         args = _merge_for_encode(cmd, tournament_data, file_id)
     except Exception as e:
@@ -2096,6 +2100,10 @@ def command_change(cmd, work):
         m = next((x for x in work.get('matches', []) if x.get('matchId') == match_id), None)
         if m is None:
             raise LookupError(f'match {abs(match_id)} is not in the hosted file')
+        if cmd.get('clear'):
+            # Clear the result (Score Entry's "Clear scores"): AES's score entry with outcome Undecided and no sets.
+            label = f"{m.get('divisionCode') or ''} {m.get('shortName') or abs(match_id)}".strip()
+            return {'op': 'score', 'match': match_id, 'clear': True}, f"{label}: score cleared{auto}"
         sets = cmd.get('sets')
         if sets is None:
             sets = m.get('sets') or []

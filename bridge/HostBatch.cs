@@ -19,6 +19,8 @@
  *         Court.ScheduleMatch, refusing a slot another match holds (same as --edit move).
  *     { "op": "score", "match": -50012, "sets": [[25, 20], [25, 18]] }
  *         A MatchData payload through SchedulerFile.UpdateWithRemoteEntryData (as --edit score).
+ *     { "op": "score", "match": -50012, "clear": true }
+ *         The same payload with outcome Undecided and no sets: the match is not played again.
  *     { "op": "finish", "play": -50010, "ranks": [2, 1, 4, 3] }
  *         One rank (or null) per team slot in Play.Teams order: a FinishData payload through
  *         UpdateWithRemoteEntryData, the shape --encode-finish builds. If AES's in-order apply
@@ -386,6 +388,19 @@ static class HostBatch
         int id = Int(c, "match");
         Match m = sf.GetMatchByID(id);
         if (m == null) return $"no match {id}";
+        if (c.TryGetValue("clear", out object clearValue) && clearValue is bool clear && clear)
+        {
+            // What AES's score entry sends for a match with its scores removed: outcome Undecided, no sets (AES clears every
+            // set slot past the ones sent), the work team sent back unchanged.
+            string[] blank =
+            {
+                sf.FileID.ToString(), MatchDataType.ToString(CultureInfo.InvariantCulture), id.ToString(CultureInfo.InvariantCulture),
+                ((int)Match.OutcomeType.Undecided).ToString(CultureInfo.InvariantCulture),
+                m.WorkTeamNumber.ToString(CultureInfo.InvariantCulture), ((int)m.TypeOfWorkTeam).ToString(CultureInfo.InvariantCulture),
+            };
+            if (sf.UpdateWithRemoteEntryData(blank) == null) return "AES did not clear the score";
+            return ScoreHolds(sf.GetMatchByID(id), Match.OutcomeType.Undecided, new List<int[]>());
+        }
         if (!(c.TryGetValue("sets", out object s) && s is object[] sets) || sets.Length == 0) return "\"sets\" must be [[ft, st], ...]";
         var pairs = new List<int[]>();
         foreach (object set in sets)
