@@ -2077,7 +2077,13 @@ def _move_change(cmd, work):
     m['courtId'], m['courtName'] = court['courtId'], court['name']
     label = f"{m.get('divisionCode') or ''} {m.get('shortName') or abs(match_id)}".strip()
     return ({'op': 'move', 'match': match_id, 'court': court['name'], 'start': start},
-            f"{label}: moved to {court['name']} at {start[11:16]}")
+            f"{label}: moved to {court['name']} at {_clock_label(start)}")
+
+
+def _clock_label(file_clock):
+    """'2026-11-21T15:00' as '3:00 PM', the way the dashboard shows times."""
+    hour, minute = int(file_clock[11:13]), file_clock[14:16]
+    return f"{hour % 12 or 12}:{minute} {'AM' if hour < 12 else 'PM'}"
 
 
 def command_change(cmd, work):
