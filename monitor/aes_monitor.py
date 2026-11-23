@@ -143,7 +143,9 @@ REMOTE_FINISH_DATA       = '33282'   # pool finish ranks set/cleared
 #   finish_ranks_clear: finish_ranks entries with "rank": null clear that team's rank.
 #   match_move: court moves, applied while hosting a .vsf (Relay hosting phase 4; AES has no live message for one).
 #   score_clear: score_correction with "clear": true (the result removed), applied while hosting a .vsf only.
-CAPABILITIES = ('finish_ranks_clear', 'match_move', 'score_clear')
+#   reseed: one tier of a round's reseed, applied whole while hosting a .vsf (Relay hosting phase 4b; AES has no live
+#           message for one either).
+CAPABILITIES = ('finish_ranks_clear', 'match_move', 'score_clear', 'reseed')
 
 OUTCOMES = {
     '0': 'Undecided', '1': 'FirstTeamWon', '2': 'SecondTeamWon',
@@ -1139,6 +1141,10 @@ def push_snapshot(tournament_data, base_url, ingest_key, timeout, cf_headers=Non
         'courts':        [{'courtId': c['courtId'], 'name': c['name']} for c in tournament_data.get('courts', [])
                           if isinstance(c.get('courtId'), int) and c.get('name')],
     }
+    if isinstance(tournament_data.get('reseeds'), list):
+        # Each round with reseeds, from AES's model (bridge ReseedFeed.cs): the dashboard's Reseeds screen. Team names,
+        # clubs and regions only, as the pools already carry; no person.
+        payload['reseeds'] = tournament_data['reseeds']
     url = base_url.rstrip('/') + '/snapshot'
     if sync:  # Relay hosting: the snapshot must land before the batch's commands are acked
         _post(url, payload, ingest_key, timeout, 'snapshot', cf_headers)
@@ -2080,6 +2086,33 @@ def _move_change(cmd, work):
             f"{label}: moved to {court['name']} at {_clock_label(start)}")
 
 
+def _reseed_change(cmd, work):
+    """A reseed command (Relay hosting phase 4b) as a --host-apply 'reseed-tier': one tier of one round, whole. The
+    bridge clears the tier's seeds, then sets each, and refuses a team that isn't reseeding or a seed that isn't one of
+    the teams' own. Updates `work` in place, so a later command in the same batch sees it."""
+    round_id = int(cmd['roundId'])
+    rnd = next((r for r in work.get('reseeds') or [] if r.get('roundId') == round_id), None)
+    if rnd is None:
+        raise LookupError(f'round {abs(round_id)} has no reseeds in the hosted file')
+    teams = cmd.get('teams') or []
+    if not teams:
+        raise ValueError('no teams')
+    reseeding = {(t.get('playId'), t.get('teamNumber')): t for t in rnd.get('teams') or [] if t.get('reseeding')}
+    out = []
+    for t in teams:
+        key = (int(t['playId']), int(t['teamNumber']))
+        if key not in reseeding:
+            raise LookupError(f'play {abs(key[0])} slot {key[1]} is not reseeding now (did a finish change?)')
+        seed = t.get('seed')
+        out.append({'play': key[0], 'team': key[1], 'seed': None if seed is None else int(seed)})
+    for x in out:
+        reseeding[(x['play'], x['team'])]['reseedSeed'] = x['seed']
+    seeds = sorted(x['seed'] for x in out if x['seed'] is not None)
+    label = str(cmd.get('label') or f'Round {abs(round_id)}')[:80]
+    what = 'reseed cleared' if not seeds else f'reseeded, seeds {seeds[0]}-{seeds[-1]}'
+    return {'op': 'reseed-tier', 'round': round_id, 'teams': out}, f'{label}: {what}'
+
+
 def _clock_label(file_clock):
     """'2026-11-21T15:00' as '3:00 PM', the way the dashboard shows times."""
     hour, minute = int(file_clock[11:13]), file_clock[14:16]
@@ -2105,6 +2138,8 @@ def command_change(cmd, work):
         return {'op': 'finish', 'play': int(cmd['playId']), 'ranks': final}, f"{label}: {what}{auto}"
     if cmd.get('type') == 'match_move':
         return _move_change(cmd, work)
+    if cmd.get('type') == 'reseed':
+        return _reseed_change(cmd, work)
     if cmd.get('type', 'score_correction') == 'score_correction':
         match_id = int(cmd['matchId'])
         m = next((x for x in work.get('matches', []) if x.get('matchId') == match_id), None)

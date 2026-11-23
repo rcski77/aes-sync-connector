@@ -387,7 +387,7 @@ class AESBridge
     // region abbreviation and never the seed or division: the same text TeamText gives with seeds off.
     // A slot with no team yet falls back to AES's own text ("Winner of ...", "Pending Reseed").
 
-    static string TeamName(Play.TeamAssignment ta, Func<string> fallback)
+    internal static string TeamName(Play.TeamAssignment ta, Func<string> fallback)
     {
         try
         {
@@ -422,19 +422,19 @@ class AESBridge
         catch { return null; }
     }
 
-    static string TeamCode(Play.TeamAssignment ta)
+    internal static string TeamCode(Play.TeamAssignment ta)
     {
         try { return TeamCode(ta?.DivisionTeamAssignment?.Team); } catch { return null; }
     }
 
     // The team's club (Team.Club.Name) and its region abbreviation (Club.RegionAbbr, e.g. "GL"), for the
     // public results site's clubs list. Null for a slot, a team with no club, or a blank value.
-    static Club TeamClub(Play.TeamAssignment ta)
+    internal static Club TeamClub(Play.TeamAssignment ta)
     {
         try { return ta?.DivisionTeamAssignment?.Team?.Club; } catch { return null; }
     }
 
-    static string Blank2Null(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+    internal static string Blank2Null(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     // ── Reflection helpers ─────────────────────────────────────────────────
     // Used for properties that are public in source but internal in the binary,
@@ -497,6 +497,11 @@ class AESBridge
             .ThenBy(p => p.CompleteShortName ?? "")
             .ToArray();
         AppendArray(sb, "pools", pools, PoolJson);
+
+        // Reseeds (Relay hosting phase 4b): each round with reseeds, from AES's own model (ReseedFeed.cs)
+        string reseeds;
+        try { reseeds = ReseedFeed.Json(sf); } catch (Exception ex) { Console.Error.WriteLine("reseeds: " + ex.Message); reseeds = "[]"; }
+        sb.AppendLine($"  \"reseeds\": {reseeds},");
 
         // Brackets
         var brackets = sf.Event.Plays
@@ -613,7 +618,7 @@ class AESBridge
     // for backward seed-tracing (e.g. gold bracket -> feeder pools) without
     // parsing naming conventions like the "R1"/"R2" prefix in CompleteShortName.
 
-    static int RoundIndex(AES.Scheduler.Model.Round round)
+    internal static int RoundIndex(AES.Scheduler.Model.Round round)
     {
         int idx = 0;
         for (var r = round; r?.PreviousRound != null; r = r.PreviousRound) idx++;
@@ -1128,7 +1133,7 @@ class AESBridge
     internal static string S(string s) => s == null ? "null"
         : "\"" + s.Replace("\\","\\\\").Replace("\"","\\\"")
                   .Replace("\r","").Replace("\n"," ") + "\"";
-    static string N(int? n) => n.HasValue ? n.Value.ToString() : "null";
+    internal static string N(int? n) => n.HasValue ? n.Value.ToString() : "null";
     internal static string B(bool b) => b ? "true" : "false";
 
     static void AppendArray<T>(StringBuilder sb, string key,

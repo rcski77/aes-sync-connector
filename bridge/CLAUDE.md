@@ -72,8 +72,14 @@ applied in order:
 { "op": "finish", "play": -50010, "ranks": [1, 2, 4, 3] }          // one per Play.Teams slot, null = none
 { "op": "reseed", "play": -50010, "team": 1, "seed": 2 }           // team = slot index or team code
 { "op": "reseed", "round": -50006, "team": "g12fwvbc1ho", "seed": 1 } // seed null = clear
+{ "op": "reseed-tier", "round": -50006, "teams": [{ "play": -50010, "team": 1, "seed": 7 }] } // one tier, whole
 { "op": "reseed-flag", "play": -50010, "rank": 1, "value": true }   // design change: rank N is reseeded
 ```
+`reseed-tier` (Relay hosting phase 4b, the dashboard's `reseed` command): every team must be one of the round's
+`ReseedingTeams` and the seeds exactly those teams' own `ExitSeedIgnoringReseed`, each once (all null = clear). It
+clears the named teams' `ReseedSeed` and any other holder of those seeds in the round (a team whose finish moved
+after its reseed: AES keeps the seed, and the setter refuses a seed held twice), then sets each. `reseed` likewise
+clears a holder anywhere in the round, not only among the reseeding teams.
 It prints every value that changed from the input (data, then AES's display text for each
 match side and play slot), fails if the reloaded file differs from the edited model, and
 writes `<payload.bin>` as the plaintext PostEvent frame (before the stream cipher; no
@@ -98,6 +104,7 @@ subprocess capture, which would corrupt it).
 |------|---------|
 | AESBridge.cs | The bridge: parse, decode and encode modes |
 | VsfEditTool.cs | Test modes that save a .vsf through AES's own code (`--roundtrip`, `--edit`, `--ids`) |
+| ReseedFeed.cs | The parse's `reseeds[]` (Relay hosting phase 4b): each round with reseeds from AES's own model |
 | HostBatch.cs | Headless host-loop spike (`--host-batch`, `--plays`) and the shared format check |
 | Publish.cs | `--publish` (by hand, sign-in typed at the console) and `--publish-json` (Relay Sync, login on stdin): AES's own `NetConnection`, `AuthenticationCommit`, `PostEvent`. The only modes that open a network connection |
 | AESBridge.csproj | .NET 4.8 x86 project |
@@ -295,6 +302,26 @@ Root nodes are those not referenced as TopSource or BottomSource by any other pl
     "matchFormat", "typeOfMatches", "setCount",
     "pointsToWinNormalSet", "pointsToWinDecidingSet",  // see "Known Play Properties" above
     "standings": [{ "team", "wins", "losses", "setsWon", "setsLost", "ptsFor", "ptsAgainst", "finishRank" }]
+  }],
+  // Relay hosting phase 4b (ReseedFeed.cs): one entry per round with a flagged reseed rank, AES's own values.
+  "reseeds": [{
+    "roundId", "roundShortName", "roundName", "roundIndex", "divisionCode", "divisionName", "divisionId",
+    "divisionRounds": [{ "roundId", "shortName", "index" }],  // the age group's rounds in AES's order (names can repeat)
+    "plays": [{ "playId", "kind", "shortName", "groupId", "groupName", "teamCount",   // group: Play.OwningGroup
+                "reseedRanks",   // finish ranks flagged RankWillBeReseeded
+                "rankSeeds",     // rankSeeds[r-1] = SortedSeeds[r-1], the seed a team finishing r exits with
+                "matches" }],    // brackets only: [{ matchId, shortName, a, b, start, decided }], a side {slot}|{winnerOf}|{loserOf}
+    "teams": [{ "playId", "teamNumber", "reseeding", "entrySeed", "finishRank",
+                "naturalSeed",   // ExitSeedIgnoringReseed
+                "reseedSeed", "exitSeed", "teamCode", "lostMatchId", "team", "club", "region",  // lostMatchId: brackets
+                "matchesWon", "matchesLost", "setsWon", "setsLost", "pointsFor", "pointsAgainst",
+                "matchPercent", "setPercent", "pointRatio" }],  // TeamStats; null where AES's is NaN
+    "played",            // [[codeA, codeB]]: decided matches in this age group's rounds up to and including this one
+    "seedsOnOffer",      // Round.ActualReseedingSeeds
+    "suggestedOrder",    // Round.SuggestedReseedOrder as [{ playId, teamNumber }]
+    "next": [{ "playId", "roundId", "kind", "shortName", "fullName",
+               "slots": [{ "teamNumber", "entrySeed", "teamCode", "team", "club", "region" }],  // teamCode null = stand-in
+               "matches" }]      // as above
   }],
   "brackets": [{
     "bracketId",

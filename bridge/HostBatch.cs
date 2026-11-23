@@ -32,6 +32,12 @@
  *         must be one of the round's ReseedingTeams, the seed one of its ActualReseedingSeeds;
  *         whoever holds that seed already is cleared first. "team" is a slot index in the
  *         play, or a team code. "seed": null clears.
+ *     { "op": "reseed-tier", "round": -50006, "teams": [{ "play": -50010, "team": 1, "seed": 7 }, ...] }
+ *         One tier of a round's reseed, whole (Relay hosting phase 4b): every team named must be one of the
+ *         round's ReseedingTeams, and the seeds given must be exactly those teams' own natural seeds
+ *         (ExitSeedIgnoringReseed), each once, so a tier never takes another tier's seed. Clears the named teams'
+ *         ReseedSeed (and any other team in the round still holding one of those seeds), then sets each.
+ *         Every "seed": null clears the tier.
  *     { "op": "reseed-flag", "play": -50010, "rank": 1, "value": true }
  *         Design change, not event-day work: marks finish rank N of a play as reseeded
  *         (Play.Teams[N-1].RankWillBeReseeded, what EditPoolControl/EditBracketControl's
@@ -320,6 +326,7 @@ static class HostBatch
             case "finish":
                 return new[] { $"play {Int(c, "play")} slot " };
             case "reseed":
+            case "reseed-tier":
             case "reseed-flag":
             {
                 Round round = null;
@@ -365,6 +372,7 @@ static class HostBatch
             case "score": return Score(sf, c);
             case "finish": return Finish(sf, c);
             case "reseed": return Reseed(sf, c);
+            case "reseed-tier": return ReseedTier(sf, c);
             case "reseed-flag":
             {
                 Play play = sf.GetPlayByID(Int(c, "play"));
@@ -537,11 +545,56 @@ static class HostBatch
         int[] seeds = round.ActualReseedingSeeds;
         if (!seeds.Contains(seed)) return $"seed {seed} is not one of this round's reseeding seeds ({string.Join(", ", seeds)})";
 
-        // The drag-drop in ReseedTeamsControl: clear whoever holds the seed, then set it.
-        Play.TeamAssignment holder = reseeding.SingleOrDefault(x => x.ReseedSeed == seed);
+        // The drag-drop in ReseedTeamsControl: clear whoever holds the seed, then set it. The holder can be a team that
+        // no longer reseeds (its finish changed after the reseed; AES keeps the seed), so look across the round.
+        Play.TeamAssignment holder = round.Plays.SelectMany(p => p.Teams).FirstOrDefault(x => x.ReseedSeed == seed);
         if (holder != null && holder != ta) holder.ReseedSeed = null;
         ta.ReseedSeed = seed;
         return ta.ReseedSeed == seed ? null : "AES did not keep the reseed";
+    }
+
+    static string ReseedTier(SchedulerFile sf, Dictionary<string, object> c)
+    {
+        int roundId = Int(c, "round");
+        Round round = sf.Event.Divisions.SelectMany(d => d.Rounds).FirstOrDefault(x => x.RoundID == roundId);
+        if (round == null) return $"no round {roundId}";
+        if (!(c.TryGetValue("teams", out object raw) && raw is object[] items) || items.Length == 0)
+            return "\"teams\" must be [{ play, team, seed }, ...]";
+        Play.TeamAssignment[] reseeding = round.ReseedingTeams;
+        var list = new List<KeyValuePair<Play.TeamAssignment, int?>>();
+        foreach (object item in items)
+        {
+            if (!(item is Dictionary<string, object> d)) return "each team must be { play, team, seed }";
+            int playId = Int(d, "play");
+            Play play = round.Plays.FirstOrDefault(p => p.PlayID == playId);
+            if (play == null) return $"play {playId} is not in round {roundId}";
+            int slot = Int(d, "team");
+            if (slot < 0 || slot >= play.Teams.Length) return $"play {playId}: slot must be 0..{play.Teams.Length - 1}";
+            Play.TeamAssignment ta = play.Teams[slot];
+            if (!reseeding.Contains(ta)) return $"{Describe(ta)} is not a reseeding team in round {roundId}";
+            if (list.Any(x => x.Key == ta)) return $"{Describe(ta)} is named twice";
+            d.TryGetValue("seed", out object seedValue);
+            if (seedValue != null && !(seedValue is int)) return "\"seed\" must be a number or null";
+            list.Add(new KeyValuePair<Play.TeamAssignment, int?>(ta, seedValue as int?));
+        }
+        bool clear = list.All(x => x.Value == null);
+        if (!clear && list.Any(x => x.Value == null)) return "give every team a seed, or none to clear";
+        int[] natural = list.Select(x => x.Key.ExitSeedIgnoringReseed.Value).OrderBy(x => x).ToArray();
+        if (!clear)
+        {
+            int[] given = list.Select(x => x.Value.Value).OrderBy(x => x).ToArray();
+            if (!given.SequenceEqual(natural))
+                return $"the seeds must be these teams' own seeds ({string.Join(", ", natural)}), each once; got {string.Join(", ", given)}";
+        }
+        var seedSet = new HashSet<int>(natural);
+        foreach (Play.TeamAssignment ta in round.Plays.SelectMany(p => p.Teams).ToArray())
+            if (ta.ReseedSeed.HasValue && (list.Any(x => x.Key == ta) || seedSet.Contains(ta.ReseedSeed.Value)))
+                ta.ReseedSeed = null;
+        foreach (var x in list)
+            if (x.Value.HasValue) x.Key.ReseedSeed = x.Value;
+        foreach (var x in list)
+            if (x.Key.ReseedSeed != x.Value) return $"AES did not keep {Describe(x.Key)} at {Show(x.Value)}";
+        return null;
     }
 
     // ── state snapshot ─────────────────────────────────────────────────────
